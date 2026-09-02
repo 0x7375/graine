@@ -12,7 +12,7 @@ const GRACE_PERIOD_SECONDS: u64 = GRACE_PERIOD_DAYS * 60 * 60 * 24;
 const DAY_IN_SEC: u64 = 60 * 60 * 24;
 const TARGET_CATEGORY: &str = "autobrr";
 const TOTAL_CAPACITY_BYTES: u64 = 150 * 1024 * 1024 * 1024;
-const MINIMUM_SCORE_THRESHOLD: f32 = 0.75;
+const MINIMUM_SCORE_THRESHOLD: f32 = 0.50;
 
 #[derive(Deserialize, Debug)]
 struct Torrent {

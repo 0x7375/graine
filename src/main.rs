@@ -7,22 +7,31 @@ use std::{
 };
 use ureq::Agent;
 
-const GRACE_PERIOD_DAYS: u64 = 7;
-const GRACE_PERIOD_SECONDS: u64 = GRACE_PERIOD_DAYS * 60 * 60 * 24;
 const DAY_IN_SEC: u64 = 60 * 60 * 24;
+const GIB: u64 = 1024 * 1024 * 1024;
+
+const GRACE_PERIOD_DAYS: u64 = 7;
+const GRACE_PERIOD_SECONDS: u64 = GRACE_PERIOD_DAYS * DAY_IN_SEC;
+
 const TARGET_CATEGORY: &str = "autobrr";
-const TOTAL_CAPACITY_BYTES: u64 = 200 * 1024 * 1024 * 1024;
-const MINIMUM_SCORE_THRESHOLD: f32 = 0.50;
+const CROSS_CATEGORY: &str = "autobrr.cross";
+
+const TOTAL_CAPACITY_BYTES: u64 = 200 * GIB;
+
+// true: a cross-seed whose original (same name + size) is gone is deleted right away.
+// false: it is only evicted under capacity pressure (safer if qui renames torrents).
+const DELETE_ORPHANS: bool = false;
 
 #[derive(Deserialize, Debug)]
 struct Torrent {
     hash: String,
     name: String,
+    category: String,
     seeding_time: u64,
     added_on: u64,
     last_activity: u64,
     ratio: f32,
-    size: f32,
+    size: u64,
     uploaded: u64,
     downloaded: u64,
     tracker: String,
@@ -54,19 +63,28 @@ fn get_sunday_midnight() -> u64 {
 
 impl fmt::Display for Torrent {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let score = if self.is_original() {
+            format!("{:.2}", self.score())
+        } else {
+            "-".to_string()
+        };
+
         write!(
             f,
-            "[{name}...]\tSize: {size:.2} GB\t| Ratio: {ratio:.2}\t| Days: {days:.1}\t| Score: {score:.2}",
+            "[{name}...]\tSize: {size:.2} GB\t| Ratio: {ratio:.2}\t| Days: {days:.1}\t| Score: {score}",
             name = self.name.chars().take(40).collect::<String>(),
-            size = self.size / (1024 * 1024 * 1024) as f32,
+            size = self.size as f64 / GIB as f64,
             ratio = self.ratio,
             days = self.seeding_time as f32 / DAY_IN_SEC as f32,
-            score = self.score()
         )
     }
 }
 
 impl Torrent {
+    fn is_original(&self) -> bool {
+        self.category == TARGET_CATEGORY
+    }
+
     fn score(&self) -> f32 {
         let days_seeded = (self.seeding_time as f32 / DAY_IN_SEC as f32).max(1.0);
         let days_inactive = elapsed(self.last_activity) / DAY_IN_SEC;
@@ -101,17 +119,23 @@ fn login(conn: &ConnectionInfo, pw: &str) {
     }
 }
 
-fn get_torrents(conn: &ConnectionInfo) -> Vec<Torrent> {
+fn fetch_category(conn: &ConnectionInfo, category: &str) -> Vec<Torrent> {
     conn.agent
         .get(format!(
-            "{}/api/v2/torrents/info?category={TARGET_CATEGORY}",
-            &conn.url
+            "{}/api/v2/torrents/info?category={category}",
+            conn.url
         ))
         .call()
         .unwrap()
         .body_mut()
         .read_json::<Vec<Torrent>>()
         .unwrap()
+}
+
+fn get_torrents(conn: &ConnectionInfo) -> Vec<Torrent> {
+    let mut all = fetch_category(conn, TARGET_CATEGORY);
+    all.extend(fetch_category(conn, CROSS_CATEGORY));
+    all
 }
 
 fn delete_torrents(conn: &ConnectionInfo, to_delete: &[Torrent]) {
@@ -173,6 +197,16 @@ fn track_weekly_stats(torrents: &[Torrent], is_dry: bool) {
     }
 }
 
+/// An original plus the cross-seeds that share its data (same name and size).
+/// Kept or deleted as one unit.
+struct Group {
+    torrents: Vec<Torrent>,
+    originals: u64,
+    is_grace: bool,
+    score: f32,
+    size: u64,
+}
+
 fn main() {
     let mut args = env::args();
     args.next();
@@ -192,46 +226,82 @@ fn main() {
 
     login(&conn, &pw);
 
-    let mut torrents = get_torrents(&conn);
+    let torrents = get_torrents(&conn);
 
     println!("--- WEEKLY SUMMARY ---");
     let is_dry = dry == Some("--dry".to_string());
     track_weekly_stats(&torrents, is_dry);
 
-    torrents.sort_by(|a, b| {
-        let score_a = if a.seeding_time < GRACE_PERIOD_SECONDS {
-            f32::MAX
-        } else {
-            a.score()
-        };
-        let score_b = if b.seeding_time < GRACE_PERIOD_SECONDS {
-            f32::MAX
-        } else {
-            b.score()
-        };
-        score_a.total_cmp(&score_b).reverse()
+    let mut by_content: HashMap<(String, u64), Vec<Torrent>> = HashMap::new();
+    for t in torrents {
+        by_content
+            .entry((t.name.clone(), t.size))
+            .or_default()
+            .push(t);
+    }
+
+    let mut groups: Vec<Group> = by_content
+        .into_values()
+        .map(|torrents| {
+            let originals: Vec<&Torrent> = torrents.iter().filter(|t| t.is_original()).collect();
+            let n = originals.len() as u64;
+            let is_grace = originals
+                .iter()
+                .any(|t| t.seeding_time < GRACE_PERIOD_SECONDS);
+            let score = originals.iter().map(|t| t.score()).fold(0.0_f32, f32::max);
+            let size = torrents[0].size * n.max(1);
+
+            Group {
+                originals: n,
+                is_grace,
+                score,
+                size,
+                torrents,
+            }
+        })
+        .collect();
+
+    groups.sort_by(|a, b| {
+        let key = |g: &Group| if g.is_grace { f32::MAX } else { g.score };
+        key(a).total_cmp(&key(b)).reverse()
     });
 
-    let mut capacity = 0.0;
+    let mut capacity: u64 = 0;
     let mut to_delete: Vec<Torrent> = vec![];
 
     println!("--- KEEPING ---");
-    for torrent in torrents {
-        if torrent.seeding_time < GRACE_PERIOD_SECONDS {
-            capacity += torrent.size;
-            println!("(GRACE)\t{}", torrent);
+    for group in groups {
+        if group.is_grace {
+            capacity += group.size;
+            for t in &group.torrents {
+                let tag = if t.is_original() {
+                    "(GRACE)"
+                } else {
+                    "(CROSS)"
+                };
+                println!("{tag}\t{t}");
+            }
             continue;
         }
 
-        if torrent.score() < MINIMUM_SCORE_THRESHOLD
-            || capacity + torrent.size > TOTAL_CAPACITY_BYTES as f32
-        {
-            to_delete.push(torrent);
+        let orphan = group.originals == 0;
+
+        if (orphan && DELETE_ORPHANS) || capacity + group.size > TOTAL_CAPACITY_BYTES {
+            to_delete.extend(group.torrents);
         } else {
-            capacity += torrent.size;
-            println!("(GOOD)\t{}", torrent);
+            capacity += group.size;
+            for t in &group.torrents {
+                let tag = if t.is_original() { "(GOOD)" } else { "(CROSS)" };
+                println!("{tag}\t{t}");
+            }
         }
     }
+
+    println!(
+        "Capacity used: {:.2} / {:.2} GB",
+        capacity as f64 / GIB as f64,
+        TOTAL_CAPACITY_BYTES as f64 / GIB as f64
+    );
 
     if to_delete.is_empty() {
         println!("Nothing to delete");

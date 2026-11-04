@@ -1,40 +1,85 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env, fmt, fs,
-    process::exit,
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
+    process::{Command, exit},
     time::{SystemTime, UNIX_EPOCH},
 };
 use ureq::Agent;
 
 const DAY_IN_SEC: u64 = 60 * 60 * 24;
 const GIB: u64 = 1024 * 1024 * 1024;
+const CROSS_SUFFIX: &str = ".cross";
+const USAGE: &str = "Usage: QBIT_PW=<password> graine <config.toml> [--dry]";
 
-const GRACE_PERIOD_DAYS: u64 = 7;
-const GRACE_PERIOD_SECONDS: u64 = GRACE_PERIOD_DAYS * DAY_IN_SEC;
+fn default_high() -> f64 {
+    0.85
+}
+fn default_low() -> f64 {
+    0.80
+}
+fn default_grace() -> u64 {
+    7
+}
 
-const TARGET_CATEGORY: &str = "autobrr";
-const CROSS_CATEGORY: &str = "autobrr.cross";
+/// A group of categories that share rules. `<category>.cross` is included automatically.
+#[derive(Deserialize)]
+struct Pool {
+    name: String,
+    categories: Vec<String>,
+    /// Optional cap on the disk this pool may occupy (reclaimable bytes only).
+    capacity_gib: Option<u64>,
+    /// Never evict a cluster whose original is younger than this (hit and run protection).
+    #[serde(default = "default_grace")]
+    grace_days: u64,
+}
 
-const TOTAL_CAPACITY_BYTES: u64 = 200 * GIB;
+/// Trackers you care about. Unlisted trackers have priority 0. When graine has to delete,
+/// lower priority goes first no matter the score; equal priority is ranked by score.
+#[derive(Deserialize)]
+struct TrackerPriority {
+    /// Matched as a substring of the torrent's tracker URL, e.g. "tracker.example.org".
+    host: String,
+    priority: i32,
+}
 
-// true: a cross-seed whose original (same name + size) is gone is deleted right away.
-// false: it is only evicted under capacity pressure (safer if qui renames torrents).
-const DELETE_ORPHANS: bool = false;
+#[derive(Deserialize)]
+struct Config {
+    #[serde(default)]
+    trackers: Vec<TrackerPriority>,
+    url: String,
+    /// Any path on the filesystem that holds downloads and library.
+    disk_path: String,
+    /// Start evicting above this fraction of disk used...
+    #[serde(default = "default_high")]
+    high_watermark: f64,
+    /// ...and stop once back under this one.
+    #[serde(default = "default_low")]
+    low_watermark: f64,
+    pools: Vec<Pool>,
+}
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 struct Torrent {
     hash: String,
     name: String,
     category: String,
+    save_path: String,
+    progress: f64,
     seeding_time: u64,
     added_on: u64,
     last_activity: u64,
-    ratio: f32,
     size: u64,
     uploaded: u64,
     downloaded: u64,
     tracker: String,
+}
+
+#[derive(Deserialize)]
+struct ApiFile {
+    name: String,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -63,35 +108,36 @@ fn get_sunday_midnight() -> u64 {
 
 impl fmt::Display for Torrent {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let score = if self.is_original() {
-            format!("{:.2}", self.score())
-        } else {
-            "-".to_string()
-        };
-
         write!(
             f,
-            "[{name}...]\tSize: {size:.2} GB\t| Ratio: {ratio:.2}\t| Days: {days:.1}\t| Score: {score}",
+            "[{name}...]\t{cat}\t| Size: {size:.2} GB\t| Up: {up:.2} GB\t| Days: {days:.1}",
             name = self.name.chars().take(40).collect::<String>(),
+            cat = self.category,
             size = self.size as f64 / GIB as f64,
-            ratio = self.ratio,
+            up = self.uploaded as f64 / GIB as f64,
             days = self.seeding_time as f32 / DAY_IN_SEC as f32,
         )
     }
 }
 
 impl Torrent {
-    fn is_original(&self) -> bool {
-        self.category == TARGET_CATEGORY
+    fn is_cross(&self) -> bool {
+        self.category.ends_with(CROSS_SUFFIX)
     }
+}
 
-    fn score(&self) -> f32 {
-        let days_seeded = (self.seeding_time as f32 / DAY_IN_SEC as f32).max(1.0);
-        let days_inactive = elapsed(self.last_activity) / DAY_IN_SEC;
-        let decay = 0.5_f32.powf(days_inactive as f32 / 3.0);
+fn pool_of(cfg: &Config, category: &str) -> Option<usize> {
+    let base = category.strip_suffix(CROSS_SUFFIX).unwrap_or(category);
+    cfg.pools
+        .iter()
+        .position(|p| p.categories.iter().any(|c| c == base))
+}
 
-        (self.ratio / days_seeded) * decay
-    }
+fn tracker_priority(cfg: &Config, tracker: &str) -> i32 {
+    cfg.trackers
+        .iter()
+        .find(|t| tracker.contains(&t.host))
+        .map_or(0, |t| t.priority)
 }
 
 struct ConnectionInfo {
@@ -119,23 +165,14 @@ fn login(conn: &ConnectionInfo, pw: &str) {
     }
 }
 
-fn fetch_category(conn: &ConnectionInfo, category: &str) -> Vec<Torrent> {
+fn get_torrents(conn: &ConnectionInfo) -> Vec<Torrent> {
     conn.agent
-        .get(format!(
-            "{}/api/v2/torrents/info?category={category}",
-            conn.url
-        ))
+        .get(format!("{}/api/v2/torrents/info", conn.url))
         .call()
         .unwrap()
         .body_mut()
         .read_json::<Vec<Torrent>>()
         .unwrap()
-}
-
-fn get_torrents(conn: &ConnectionInfo) -> Vec<Torrent> {
-    let mut all = fetch_category(conn, TARGET_CATEGORY);
-    all.extend(fetch_category(conn, CROSS_CATEGORY));
-    all
 }
 
 fn delete_torrents(conn: &ConnectionInfo, to_delete: &[Torrent]) {
@@ -153,6 +190,92 @@ fn delete_torrents(conn: &ConnectionInfo, to_delete: &[Torrent]) {
         eprintln!("Failed to delete torrents: {e}");
         exit(1)
     }
+}
+
+/// (used, total) bytes of the filesystem holding `path`, like `df` reports them.
+fn disk_usage(path: &str) -> (u64, u64) {
+    let out = Command::new("df")
+        .args(["-B1", "--output=used,avail", path])
+        .output()
+        .unwrap_or_else(|e| {
+            eprintln!("Cannot run df: {e}");
+            exit(1)
+        });
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    let parsed = text.lines().nth(1).and_then(|line| {
+        let mut it = line.split_whitespace().map(|v| v.parse::<u64>());
+        match (it.next(), it.next()) {
+            (Some(Ok(used)), Some(Ok(avail))) => Some((used, used + avail)),
+            _ => None,
+        }
+    });
+
+    parsed.unwrap_or_else(|| {
+        eprintln!("Cannot parse df output for {path}");
+        exit(1)
+    })
+}
+
+struct FileRef {
+    dev: u64,
+    ino: u64,
+    nlink: u64,
+    size: u64,
+    path: PathBuf,
+}
+
+struct Entry {
+    torrent: Torrent,
+    files: Vec<FileRef>,
+}
+
+/// Files of a torrent with their on-disk identity. An API failure aborts the run
+/// (nothing gets deleted); a torrent whose files cannot be read is skipped.
+fn torrent_files(conn: &ConnectionInfo, t: &Torrent) -> Option<Vec<FileRef>> {
+    let files = conn
+        .agent
+        .get(format!(
+            "{}/api/v2/torrents/files?hash={}",
+            conn.url, t.hash
+        ))
+        .call()
+        .and_then(|mut r| r.body_mut().read_json::<Vec<ApiFile>>());
+
+    let files = match files {
+        Ok(f) if !f.is_empty() => f,
+        Ok(_) => {
+            eprintln!("WARN: no file list for {}, skipping", t.name);
+            return None;
+        }
+        Err(e) => {
+            eprintln!("Failed to list files for {}: {e}, aborting", t.name);
+            exit(1)
+        }
+    };
+
+    let mut out = Vec::with_capacity(files.len());
+    for f in files {
+        let path = Path::new(&t.save_path).join(&f.name);
+        match fs::metadata(&path) {
+            Ok(m) => out.push(FileRef {
+                dev: m.dev(),
+                ino: m.ino(),
+                nlink: m.nlink(),
+                size: m.len(),
+                path,
+            }),
+            Err(e) => {
+                eprintln!(
+                    "WARN: cannot stat {}: {e}, skipping {}",
+                    path.display(),
+                    t.name
+                );
+                return None;
+            }
+        }
+    }
+    Some(out)
 }
 
 fn track_weekly_stats(torrents: &[Torrent], is_dry: bool) {
@@ -197,125 +320,334 @@ fn track_weekly_stats(torrents: &[Torrent], is_dry: bool) {
     }
 }
 
-/// An original plus the cross-seeds that share its data (same name and size).
-/// Kept or deleted as one unit.
-struct Group {
+/// Torrents that share files on disk (same inode). Space only comes back when every
+/// member goes, so the cluster is what gets ranked, kept or deleted.
+struct Cluster {
     torrents: Vec<Torrent>,
-    originals: u64,
+    pool: usize,
+    /// Highest tracker priority among the members: keeping the cluster serves that tracker.
+    priority: i32,
+    /// Bytes a delete would actually free: files whose every hardlink belongs to the cluster.
+    /// 0 means something outside (typically the library) keeps the data alive.
+    cost: u64,
+    uploaded: u64,
+    days: f32,
     is_grace: bool,
+    /// Upload per freed byte per day, decayed by inactivity. Infinite when cost is 0.
     score: f32,
-    size: u64,
+}
+
+fn find(parent: &mut [usize], mut i: usize) -> usize {
+    while parent[i] != i {
+        parent[i] = parent[parent[i]];
+        i = parent[i];
+    }
+    i
+}
+
+fn build_cluster(cfg: &Config, entries: Vec<Entry>) -> Cluster {
+    // inode -> (hardlink count, size, distinct paths referenced by the cluster)
+    let mut inodes: HashMap<(u64, u64), (u64, u64, HashSet<PathBuf>)> = HashMap::new();
+    for e in &entries {
+        for f in &e.files {
+            inodes
+                .entry((f.dev, f.ino))
+                .or_insert((f.nlink, f.size, HashSet::new()))
+                .2
+                .insert(f.path.clone());
+        }
+    }
+    let cost: u64 = inodes
+        .values()
+        .filter(|(nlink, _, paths)| paths.len() as u64 >= *nlink)
+        .map(|(_, size, _)| *size)
+        .sum();
+
+    let uploaded: u64 = entries.iter().map(|e| e.torrent.uploaded).sum();
+
+    let seeding_time = entries
+        .iter()
+        .map(|e| e.torrent.seeding_time)
+        .max()
+        .unwrap_or(0);
+    let days = seeding_time as f32 / DAY_IN_SEC as f32;
+
+    let last_activity = entries
+        .iter()
+        .map(|e| e.torrent.last_activity)
+        .max()
+        .unwrap_or(0);
+    let days_inactive = elapsed(last_activity) / DAY_IN_SEC;
+    let decay = 0.5_f32.powf(days_inactive as f32 / 3.0);
+
+    // The oldest member decides which pool the cluster belongs to.
+    let oldest = entries.iter().min_by_key(|e| e.torrent.added_on).unwrap();
+    let pool = pool_of(cfg, &oldest.torrent.category).unwrap_or(0);
+    let grace_secs = cfg.pools[pool].grace_days * DAY_IN_SEC;
+
+    // Grace follows the non-cross members: a cross-seed added late must not extend the
+    // protection. With no original left, the cross-seeds act as the original.
+    let anchors: Vec<&Entry> = entries.iter().filter(|e| !e.torrent.is_cross()).collect();
+    let is_grace = if anchors.is_empty() {
+        entries.iter().any(|e| e.torrent.seeding_time < grace_secs)
+    } else {
+        anchors.iter().any(|e| e.torrent.seeding_time < grace_secs)
+    };
+
+    let score = if cost == 0 {
+        f32::INFINITY
+    } else {
+        (uploaded as f32 / cost as f32) / days.max(1.0) * decay
+    };
+
+    let priority = entries
+        .iter()
+        .map(|e| tracker_priority(cfg, &e.torrent.tracker))
+        .max()
+        .unwrap_or(0);
+
+    Cluster {
+        torrents: entries.into_iter().map(|e| e.torrent).collect(),
+        pool,
+        priority,
+        cost,
+        uploaded,
+        days,
+        is_grace,
+        score,
+    }
+}
+
+fn print_cluster(cfg: &Config, tag: &str, c: &Cluster) {
+    let score = if c.score.is_finite() {
+        format!("{:.2}", c.score)
+    } else {
+        "-".to_string()
+    };
+    println!(
+        "{tag}\t{} | Prio: {} | Score: {score} | Cost: {:.2} GB | Up: {:.2} GB | Days: {:.1}",
+        cfg.pools[c.pool].name,
+        c.priority,
+        c.cost as f64 / GIB as f64,
+        c.uploaded as f64 / GIB as f64,
+        c.days
+    );
+    for t in &c.torrents {
+        println!("\t  {t}");
+    }
 }
 
 fn main() {
     let mut args = env::args();
     args.next();
 
-    let (Some(url), dry, None) = (args.next(), args.next(), args.next()) else {
-        eprintln!("Usage: QBIT_PW=<password> graine <url> [--dry]");
+    let (Some(config_path), dry, None) = (args.next(), args.next(), args.next()) else {
+        eprintln!("{USAGE}");
         exit(1);
     };
+    let is_dry = dry.as_deref() == Some("--dry");
+    if dry.is_some() && !is_dry {
+        eprintln!("{USAGE}");
+        exit(1);
+    }
+
+    let cfg_text = fs::read_to_string(&config_path).unwrap_or_else(|e| {
+        eprintln!("Cannot read {config_path}: {e}");
+        exit(1)
+    });
+    let cfg: Config = toml::from_str(&cfg_text).unwrap_or_else(|e| {
+        eprintln!("Bad config: {e}");
+        exit(1)
+    });
+    if cfg.pools.is_empty() || cfg.low_watermark >= cfg.high_watermark {
+        eprintln!("Bad config: need at least one pool and low_watermark < high_watermark");
+        exit(1);
+    }
 
     let Ok(pw) = env::var("QBIT_PW") else {
         eprintln!("Error: QBIT_PW environment variable is missing.");
         exit(1);
     };
 
-    let agent = ureq::agent();
-    let conn = ConnectionInfo { agent, url };
-
+    let conn = ConnectionInfo {
+        agent: ureq::agent(),
+        url: cfg.url.clone(),
+    };
     login(&conn, &pw);
 
-    let torrents = get_torrents(&conn);
-
-    println!("--- WEEKLY SUMMARY ---");
-    let is_dry = dry == Some("--dry".to_string());
-    track_weekly_stats(&torrents, is_dry);
-
-    let mut by_content: HashMap<(String, u64), Vec<Torrent>> = HashMap::new();
-    for t in torrents {
-        by_content
-            .entry((t.name.clone(), t.size))
-            .or_default()
-            .push(t);
-    }
-
-    let mut groups: Vec<Group> = by_content
-        .into_values()
-        .map(|torrents| {
-            let originals: Vec<&Torrent> = torrents.iter().filter(|t| t.is_original()).collect();
-            let n = originals.len() as u64;
-            let is_grace = originals
-                .iter()
-                .any(|t| t.seeding_time < GRACE_PERIOD_SECONDS);
-            let score = originals.iter().map(|t| t.score()).fold(0.0_f32, f32::max);
-            let size = torrents[0].size * n.max(1);
-
-            Group {
-                originals: n,
-                is_grace,
-                score,
-                size,
-                torrents,
-            }
-        })
+    let managed: Vec<Torrent> = get_torrents(&conn)
+        .into_iter()
+        .filter(|t| pool_of(&cfg, &t.category).is_some())
         .collect();
 
-    groups.sort_by(|a, b| {
-        let key = |g: &Group| if g.is_grace { f32::MAX } else { g.score };
-        key(a).total_cmp(&key(b)).reverse()
-    });
+    println!("--- WEEKLY SUMMARY ---");
+    track_weekly_stats(&managed, is_dry);
 
-    let mut capacity: u64 = 0;
-    let mut to_delete: Vec<Torrent> = vec![];
+    // Only completed torrents are ranked. Incomplete ones (stuck, stalled, failed
+    // import) are left alone for Cleanuparr.
+    let complete: Vec<Torrent> = managed.into_iter().filter(|t| t.progress >= 1.0).collect();
 
-    println!("--- KEEPING ---");
-    for group in groups {
-        if group.is_grace {
-            capacity += group.size;
-            for t in &group.torrents {
-                let tag = if t.is_original() {
-                    "(GRACE)"
-                } else {
-                    "(CROSS)"
-                };
-                println!("{tag}\t{t}");
-            }
-            continue;
+    let mut entries: Vec<Entry> = vec![];
+    for t in complete {
+        if let Some(files) = torrent_files(&conn, &t) {
+            entries.push(Entry { torrent: t, files });
         }
+    }
 
-        let orphan = group.originals == 0;
-
-        if (orphan && DELETE_ORPHANS) || capacity + group.size > TOTAL_CAPACITY_BYTES {
-            to_delete.extend(group.torrents);
-        } else {
-            capacity += group.size;
-            for t in &group.torrents {
-                let tag = if t.is_original() { "(GOOD)" } else { "(CROSS)" };
-                println!("{tag}\t{t}");
+    // Link torrents that share an inode (union-find), so chains like
+    // original -> cross-seed A -> cross-seed B land in one cluster.
+    let mut parent: Vec<usize> = (0..entries.len()).collect();
+    let mut owner: HashMap<(u64, u64), usize> = HashMap::new();
+    for (i, e) in entries.iter().enumerate() {
+        for f in &e.files {
+            let key = (f.dev, f.ino);
+            let existing = owner.get(&key).copied();
+            match existing {
+                Some(j) => {
+                    let a = find(&mut parent, i);
+                    let b = find(&mut parent, j);
+                    parent[a] = b;
+                }
+                None => {
+                    owner.insert(key, i);
+                }
             }
         }
     }
 
-    println!(
-        "Capacity used: {:.2} / {:.2} GB",
-        capacity as f64 / GIB as f64,
-        TOTAL_CAPACITY_BYTES as f64 / GIB as f64
-    );
+    let mut by_root: HashMap<usize, Vec<Entry>> = HashMap::new();
+    for (i, e) in entries.into_iter().enumerate() {
+        let root = find(&mut parent, i);
+        by_root.entry(root).or_default().push(e);
+    }
 
-    if to_delete.is_empty() {
+    let mut clusters: Vec<Cluster> = by_root
+        .into_values()
+        .map(|es| build_cluster(&cfg, es))
+        .collect();
+
+    // Best first: grace, then higher tracker priority, then higher score. Everything is
+    // deleted from the back of this order, so low priority goes before any score matters.
+    // Cost-0 clusters have an infinite score and are skipped below.
+    clusters.sort_by(|a, b| {
+        let key = |c: &Cluster| {
+            (
+                c.is_grace,
+                c.priority,
+                if c.is_grace { 0.0 } else { c.score },
+            )
+        };
+        let (ag, ap, asc) = key(a);
+        let (bg, bp, bsc) = key(b);
+        bg.cmp(&ag).then(bp.cmp(&ap)).then(bsc.total_cmp(&asc))
+    });
+
+    // Step 1: per-pool capacity.
+    let mut pool_used: Vec<u64> = vec![0; cfg.pools.len()];
+    let mut kept: Vec<(&str, Cluster)> = vec![];
+    let mut dropped: Vec<(&str, Cluster)> = vec![];
+
+    for c in clusters {
+        if c.cost == 0 {
+            kept.push(("(FREE)", c));
+            continue;
+        }
+        if c.is_grace {
+            pool_used[c.pool] += c.cost;
+            kept.push(("(GRACE)", c));
+            continue;
+        }
+        let over = cfg.pools[c.pool]
+            .capacity_gib
+            .is_some_and(|g| pool_used[c.pool] + c.cost > g * GIB);
+        if over {
+            dropped.push(("(DEL-CAP)", c));
+        } else {
+            pool_used[c.pool] += c.cost;
+            kept.push(("(GOOD)", c));
+        }
+    }
+
+    // Step 2: global watermark. Evict the lowest score across all pools, counting only
+    // the bytes each delete actually frees, until back under the low watermark.
+    let (used, total) = disk_usage(&cfg.disk_path);
+    let freed: u64 = dropped.iter().map(|(_, c)| c.cost).sum();
+    let mut projected = used.saturating_sub(freed);
+    let high = (cfg.high_watermark * total as f64) as u64;
+    let low = (cfg.low_watermark * total as f64) as u64;
+
+    let mut evict: HashSet<usize> = HashSet::new();
+    if projected > high {
+        let mut idx = kept.len();
+        while idx > 0 && projected > low {
+            idx -= 1;
+            let c = &kept[idx].1;
+            if c.is_grace || c.cost == 0 {
+                continue;
+            }
+            projected = projected.saturating_sub(c.cost);
+            evict.insert(idx);
+        }
+    }
+    let over_limit = projected > high;
+
+    let mut final_kept: Vec<(&str, Cluster)> = vec![];
+    for (i, (tag, c)) in kept.into_iter().enumerate() {
+        if evict.contains(&i) {
+            dropped.push(("(DEL-DISK)", c));
+        } else {
+            final_kept.push((tag, c));
+        }
+    }
+
+    println!("--- KEEPING ---");
+    for (tag, c) in &final_kept {
+        print_cluster(&cfg, tag, c);
+    }
+
+    println!("--- POOLS ---");
+    for (i, p) in cfg.pools.iter().enumerate() {
+        let cap = p
+            .capacity_gib
+            .map_or("no cap".to_string(), |g| format!("{g} GiB cap"));
+        println!(
+            "{}: {:.2} GB reclaimable ({cap})",
+            p.name,
+            pool_used[i] as f64 / GIB as f64
+        );
+    }
+    println!(
+        "Disk: {:.1}% used now, {:.1}% after deletions (evict above {:.0}%, down to {:.0}%)",
+        used as f64 / total as f64 * 100.0,
+        projected as f64 / total as f64 * 100.0,
+        cfg.high_watermark * 100.0,
+        cfg.low_watermark * 100.0
+    );
+    if over_limit {
+        eprintln!(
+            "WARNING: still above the high watermark with nothing left to evict \
+             (everything else is in grace or backed by files outside graine's pools)"
+        );
+    }
+
+    if dropped.is_empty() {
         println!("Nothing to delete");
-        exit(0)
+        exit(if over_limit { 2 } else { 0 })
     }
 
     println!("--- DELETING ---");
-    for torrent in &to_delete {
-        println!("{}", torrent);
+    for (tag, c) in &dropped {
+        print_cluster(&cfg, tag, c);
     }
+
+    let to_delete: Vec<Torrent> = dropped.into_iter().flat_map(|(_, c)| c.torrents).collect();
 
     if !is_dry {
         delete_torrents(&conn, &to_delete);
     }
 
     println!("Deleted {} torrents.", to_delete.len());
+    if over_limit {
+        exit(2)
+    }
 }

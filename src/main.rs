@@ -265,6 +265,9 @@ fn torrent_files(conn: &ConnectionInfo, t: &Torrent) -> Option<Vec<FileRef>> {
                 size: m.len(),
                 path,
             }),
+            // Files that were never downloaded (unwanted files set to "do not download",
+            // junk removed by Cleanuparr...) take no space, so they cost nothing.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
                 eprintln!(
                     "WARN: cannot stat {}: {e}, skipping {}",
@@ -274,6 +277,10 @@ fn torrent_files(conn: &ConnectionInfo, t: &Torrent) -> Option<Vec<FileRef>> {
                 return None;
             }
         }
+    }
+    if out.is_empty() {
+        eprintln!("WARN: no file of {} exists on disk, skipping", t.name);
+        return None;
     }
     Some(out)
 }

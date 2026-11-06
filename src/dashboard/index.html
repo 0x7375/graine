@@ -4,7 +4,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <meta name="color-scheme" content="dark">
+    <meta name="color-scheme" content="light dark">
     <title>graine · dashboard</title>
     <link rel="stylesheet" href="/style.css">
 </head>
@@ -13,115 +13,84 @@
     <div class="wrap">
         <header class="top">
             <div class="brand">
-                <div class="seed">✳</div>
+                <div class="seed" aria-hidden="true"><svg viewBox="0 0 24 24" width="23" height="23" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M19.5 4.5C12 4.5 6 7.4 6 13.2A6.3 6.3 0 0 0 12.3 19.5C18.1 19.5 19.5 12 19.5 4.5Z"/><path d="M4 20c2.3-4.1 5.8-7.2 10.2-9.3"/></svg></div>
                 <div>
                     <h1>graine</h1>
-                    <p>ratio farming · storage & tracker analytics</p>
+                    <p>Torrent storage and transfer statistics</p>
                 </div>
             </div>
-            <div class="runstate" id="runstate"></div>
         </header>
-        <nav class="nav"><a href="#overview">Overview</a><a href="#disk">Disk</a><a href="#pools">Pools</a><a
-                href="#trackers">Trackers</a><a href="#leaderboard">Leaderboard</a><a href="#ranking">Ranking</a><a
-                href="#deletions">Evictions</a></nav>
+        <nav class="nav" aria-label="Dashboard views" role="tablist">
+            <button id="tab-overview" class="nav-tab active" type="button" role="tab" aria-selected="true" aria-controls="view-overview" data-view="overview">Overview</button>
+            <button id="tab-storage" class="nav-tab" type="button" role="tab" aria-selected="false" aria-controls="view-storage" data-view="storage">Storage</button>
+            <button id="tab-leaderboard" class="nav-tab" type="button" role="tab" aria-selected="false" aria-controls="view-leaderboard" data-view="leaderboard">Leaderboard</button>
+            <button id="tab-evictions" class="nav-tab" type="button" role="tab" aria-selected="false" aria-controls="view-evictions" data-view="evictions">Evictions</button>
+        </nav>
         <div id="notice"></div>
-        <section id="overview">
-            <div class="section-head">
-                <div>
-                    <h2>Overview</h2>
-                    <p id="last-run"></p>
-                </div>
+        <main id="dashboard-views">
+        <div class="view active" id="view-overview" role="tabpanel" aria-labelledby="tab-overview">
+        <section class="section" id="trackers">
+            <div class="section-head"><div><h2>Tracker breakdown</h2><p>Net upload by tracker, with cross-seed net upload shown separately.</p></div>
+                <div class="controls"><label for="tracker-period">Period</label><select id="tracker-period">
+                    <option value="all">All time</option><option value="year">This year</option><option value="month">This month</option><option value="week">This week</option>
+                </select></div>
             </div>
+            <div id="tracker-table"></div>
+        </section>
+        <section class="section" id="ranking">
+            <div class="section-head"><div><h2>Ranking</h2><p>Clusters ordered by score, highest first.</p></div>
+                <div class="controls"><input class="search" id="ranking-search" placeholder="Search torrent, tracker or pool…" aria-label="Search ranking"></div>
+            </div><div id="ranking-table"></div>
+        </section>
+        </div>
+        <div class="view" id="view-storage" role="tabpanel" aria-labelledby="tab-storage" hidden>
+        <section class="section" id="overview-metrics">
+            <div class="section-head"><div><h2>Disk usage</h2></div></div>
             <div class="grid metrics" id="metrics"></div>
         </section>
-        <section class="section grid two" id="disk">
-            <div class="card">
-                <h3>Disk usage history</h3>
-                <div id="disk-chart"></div>
-                <div class="legend"><span><i></i>Used space</span><span class="lh"><i></i>High watermark</span><span
-                        class="ll"><i></i>Low watermark</span></div>
-            </div>
-            <div class="card">
-                <h3>Reclaimable vs protected data</h3>
-                <div id="space-split"></div>
-                <div class="splitlabels"><span><i style="color:var(--green)">●</i> Reclaimable</span><span><i
-                            style="color:#647a69">●</i> Protected / library-backed</span></div>
-                <p class="tiny">Counts distinct on-disk inodes in retained completed torrent clusters, not duplicated
-                    qBittorrent torrent sizes.</p>
-            </div>
-        </section>
+        <section class="section" id="disk"><div class="card disk-card"><h3>Disk usage history</h3><div id="disk-chart"></div>
+            <div class="legend"><span><i></i>Used space</span><span class="lh"><i></i>High watermark</span><span class="ll"><i></i>Low watermark</span></div>
+        </div></section>
         <section class="section" id="pools">
             <div class="section-head">
                 <div>
-                    <h2>Pool usage</h2>
-                    <p>Reclaimable bytes retained after this run's decisions.</p>
+                    <h2>Pool space</h2>
+                    <p>Managed torrent space in each pool.</p>
                 </div>
             </div>
             <div class="card" id="pool-list"></div>
         </section>
-        <section class="section" id="trackers">
-            <div class="section-head">
-                <div>
-                    <h2>Tracker performance</h2>
-                    <p>Uploaded, downloaded and net transfer, split between regular and cross-seed torrents.</p>
-                </div>
-                <div class="controls"><label for="tracker-period">Period</label><select id="tracker-period">
-                        <option value="all">All time</option>
-                        <option value="year">This year</option>
-                        <option value="month">This month</option>
-                        <option value="week">This week</option>
-                    </select></div>
-            </div>
-            <div class="tablewrap" id="tracker-table"></div>
-        </section>
+        </div>
+        <div class="view" id="view-leaderboard" role="tabpanel" aria-labelledby="tab-leaderboard" hidden>
         <section class="section" id="leaderboard">
             <div class="section-head">
                 <div>
                     <h2>Torrent leaderboard</h2>
-                    <p>Individual torrents, including cross-seeds. All-time totals survive torrent deletion.</p>
+                    <p>Top 10 torrents by net upload.</p>
                 </div>
                 <div class="controls"><label for="leader-period">Period</label><select id="leader-period">
                         <option value="all">All time</option>
                         <option value="year">This year</option>
                         <option value="month">This month</option>
                         <option value="week">This week</option>
-                    </select><label for="leader-metric">Rank by</label><select id="leader-metric">
-                        <option value="uploaded">Uploaded</option>
-                        <option value="net">Net upload</option>
-                        <option value="ratio">Ratio</option>
                     </select></div>
             </div>
             <div class="tablewrap" id="leader-table"></div>
         </section>
-        <section class="section" id="ranking">
-            <div class="section-head">
-                <div>
-                    <h2>Latest Graine ranking</h2>
-                    <p>Clusters ranked for this run, with the decision Graine made or would make.</p>
-                </div>
-                <div class="controls"><input class="search" id="ranking-search"
-                        placeholder="Search torrent, tracker or pool…"><select id="ranking-status">
-                        <option value="all">All decisions</option>
-                        <option>GOOD</option>
-                        <option>GRACE</option>
-                        <option>FREE</option>
-                        <option>DELETED</option>
-                        <option>WOULD DELETE</option>
-                    </select></div>
-            </div>
-            <div class="tablewrap" id="ranking-table"></div>
-        </section>
+        </div>
+        <div class="view" id="view-evictions" role="tabpanel" aria-labelledby="tab-evictions" hidden>
         <section class="section" id="deletions">
             <div class="section-head">
                 <div>
                     <h2>Eviction history</h2>
-                    <p>Actual qBittorrent delete requests only. Dry-run candidates never appear here.</p>
+                    <p>Recent torrent removals.</p>
                 </div>
             </div>
             <div class="tablewrap" id="deletion-table"></div>
         </section>
-        <footer class="footer">Generated by graine · data stored locally on the host · timestamps recorded in UTC
-        </footer>
+        </div>
+        </main>
+        <footer class="footer"><span id="last-run"></span></footer>
     </div>
     <script>window.GRAINE_DATA = __GRAINE_DATA__;</script>
     <script src="/app.js" defer></script>

@@ -212,6 +212,7 @@ struct LeaderboardEntry {
     is_cross_seed: bool,
     uploaded_bytes: u64,
     downloaded_bytes: u64,
+    timestamp: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -1020,6 +1021,7 @@ fn all_time_period(state: &AnalyticsState) -> AnalyticsPeriod {
             is_cross_seed: t.category.ends_with(CROSS_SUFFIX),
             uploaded_bytes: t.all_time_uploaded_bytes,
             downloaded_bytes: t.all_time_downloaded_bytes,
+            timestamp: t.last_seen_at,
         })
         .collect();
     AnalyticsPeriod {
@@ -1061,6 +1063,7 @@ fn activity_period(events: &[ActivityEvent], start: u64, now: u64) -> AnalyticsP
                 is_cross_seed: event.is_cross_seed,
                 uploaded_bytes: 0,
                 downloaded_bytes: 0,
+                timestamp: event.timestamp,
             });
         torrent.name = event.name.clone();
         torrent.tracker = event.tracker.clone();
@@ -1070,6 +1073,7 @@ fn activity_period(events: &[ActivityEvent], start: u64, now: u64) -> AnalyticsP
         torrent.downloaded_bytes = torrent
             .downloaded_bytes
             .saturating_add(event.downloaded_bytes);
+        torrent.timestamp = torrent.timestamp.max(event.timestamp);
     }
     AnalyticsPeriod {
         trackers: tracker_rows(trackers),

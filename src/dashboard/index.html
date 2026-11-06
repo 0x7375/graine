@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>graine · dashboard</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+
+<body>
+    <div class="wrap">
+        <header class="top">
+            <div class="brand">
+                <div class="seed">✳</div>
+                <div>
+                    <h1>graine</h1>
+                    <p>ratio farming · storage & tracker analytics</p>
+                </div>
+            </div>
+            <div class="runstate" id="runstate"></div>
+        </header>
+        <nav class="nav"><a href="#overview">Overview</a><a href="#disk">Disk</a><a href="#pools">Pools</a><a
+                href="#trackers">Trackers</a><a href="#leaderboard">Leaderboard</a><a href="#ranking">Ranking</a><a
+                href="#deletions">Evictions</a></nav>
+        <div id="notice"></div>
+        <section id="overview">
+            <div class="section-head">
+                <div>
+                    <h2>Overview</h2>
+                    <p id="last-run"></p>
+                </div>
+            </div>
+            <div class="grid metrics" id="metrics"></div>
+        </section>
+        <section class="section grid two" id="disk">
+            <div class="card">
+                <h3>Disk usage history</h3>
+                <div id="disk-chart"></div>
+                <div class="legend"><span><i></i>Used space</span><span class="lh"><i></i>High watermark</span><span
+                        class="ll"><i></i>Low watermark</span></div>
+            </div>
+            <div class="card">
+                <h3>Reclaimable vs protected data</h3>
+                <div id="space-split"></div>
+                <div class="splitlabels"><span><i style="color:var(--green)">●</i> Reclaimable</span><span><i
+                            style="color:#647a69">●</i> Protected / library-backed</span></div>
+                <p class="tiny">Counts distinct on-disk inodes in retained completed torrent clusters, not duplicated
+                    qBittorrent torrent sizes.</p>
+            </div>
+        </section>
+        <section class="section" id="pools">
+            <div class="section-head">
+                <div>
+                    <h2>Pool usage</h2>
+                    <p>Reclaimable bytes retained after this run's decisions.</p>
+                </div>
+            </div>
+            <div class="card" id="pool-list"></div>
+        </section>
+        <section class="section" id="trackers">
+            <div class="section-head">
+                <div>
+                    <h2>Tracker performance</h2>
+                    <p>Uploaded, downloaded and net transfer, split between regular and cross-seed torrents.</p>
+                </div>
+                <div class="controls"><label for="tracker-period">Period</label><select id="tracker-period">
+                        <option value="all">All time</option>
+                        <option value="year">This year</option>
+                        <option value="month">This month</option>
+                        <option value="week">This week</option>
+                    </select></div>
+            </div>
+            <div class="tablewrap" id="tracker-table"></div>
+        </section>
+        <section class="section" id="leaderboard">
+            <div class="section-head">
+                <div>
+                    <h2>Torrent leaderboard</h2>
+                    <p>Individual torrents, including cross-seeds. All-time totals survive torrent deletion.</p>
+                </div>
+                <div class="controls"><label for="leader-period">Period</label><select id="leader-period">
+                        <option value="all">All time</option>
+                        <option value="year">This year</option>
+                        <option value="month">This month</option>
+                        <option value="week">This week</option>
+                    </select><label for="leader-metric">Rank by</label><select id="leader-metric">
+                        <option value="uploaded">Uploaded</option>
+                        <option value="net">Net upload</option>
+                        <option value="ratio">Ratio</option>
+                    </select></div>
+            </div>
+            <div class="tablewrap" id="leader-table"></div>
+        </section>
+        <section class="section" id="ranking">
+            <div class="section-head">
+                <div>
+                    <h2>Latest Graine ranking</h2>
+                    <p>Clusters ranked for this run, with the decision Graine made or would make.</p>
+                </div>
+                <div class="controls"><input class="search" id="ranking-search"
+                        placeholder="Search torrent, tracker or pool…"><select id="ranking-status">
+                        <option value="all">All decisions</option>
+                        <option>GOOD</option>
+                        <option>GRACE</option>
+                        <option>FREE</option>
+                        <option>DELETED</option>
+                        <option>WOULD DELETE</option>
+                    </select></div>
+            </div>
+            <div class="tablewrap" id="ranking-table"></div>
+        </section>
+        <section class="section" id="deletions">
+            <div class="section-head">
+                <div>
+                    <h2>Eviction history</h2>
+                    <p>Actual qBittorrent delete requests only. Dry-run candidates never appear here.</p>
+                </div>
+            </div>
+            <div class="tablewrap" id="deletion-table"></div>
+        </section>
+        <footer class="footer">Generated by graine · data stored locally on the host · timestamps recorded in UTC
+        </footer>
+    </div>
+    <script>window.GRAINE_DATA = __GRAINE_DATA__;</script>
+    <script src="/app.js" defer></script>
+</body>
+
+</html>

@@ -287,10 +287,6 @@ fn now_unix() -> u64 {
         .as_secs()
 }
 
-fn elapsed(time: u64) -> u64 {
-    now_unix().saturating_sub(time)
-}
-
 /// Convert days since 1970-01-01 to a Gregorian UTC date.
 fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
     let z = days_since_epoch + 719_468;
@@ -349,7 +345,7 @@ fn tracker_priority(cfg: &Config, tracker: &str) -> i32 {
 fn tracker_host(tracker: &str) -> String {
     let without_scheme = tracker.split_once("://").map_or(tracker, |(_, rest)| rest);
     let authority = without_scheme
-        .split(|c| c == '/' || c == '?' || c == '#')
+        .split(['/', '?', '#'])
         .next()
         .unwrap_or(without_scheme)
         .rsplit('@')
@@ -785,7 +781,7 @@ struct Cluster {
     uploaded: u64,
     days: f32,
     is_grace: bool,
-    score: f32,
+    score: f64,
     rank: usize,
 }
 
@@ -829,13 +825,6 @@ fn build_cluster(cfg: &Config, entries: Vec<Entry>) -> Cluster {
         .max()
         .unwrap_or(0);
     let days = seeding_time as f32 / DAY_IN_SEC as f32;
-    let last_activity = entries
-        .iter()
-        .map(|e| e.torrent.last_activity)
-        .max()
-        .unwrap_or(0);
-    let days_inactive = elapsed(last_activity) / DAY_IN_SEC;
-    let decay = 0.5_f32.powf(days_inactive as f32 / 3.0);
 
     let oldest = entries.iter().min_by_key(|e| e.torrent.added_on).unwrap();
     let pool = pool_of(cfg, &oldest.torrent.category).unwrap_or(0);
@@ -847,10 +836,26 @@ fn build_cluster(cfg: &Config, entries: Vec<Entry>) -> Cluster {
         anchors.iter().any(|e| e.torrent.seeding_time < grace_secs)
     };
 
+    let now = now_unix();
+
+    let upload_rate: f64 = entries
+        .iter()
+        .map(|e| {
+            let seeding_days = (e.torrent.seeding_time as f64 / DAY_IN_SEC as f64).max(1.0);
+
+            let inactive_days =
+                now.saturating_sub(e.torrent.last_activity) as f64 / DAY_IN_SEC as f64;
+
+            let activity_factor = 1.0 / (1.0 + inactive_days / 7.0);
+
+            (e.torrent.uploaded as f64 / seeding_days) * activity_factor
+        })
+        .sum();
+
     let score = if cost == 0 {
-        f32::INFINITY
+        f64::INFINITY
     } else {
-        (uploaded as f32 / cost as f32) / days.max(1.0) * decay
+        upload_rate / cost as f64
     };
     let priority = entries
         .iter()
@@ -924,7 +929,7 @@ fn cluster_dashboard_row(cfg: &Config, tag: &str, c: &Cluster, is_dry: bool) -> 
         status,
         reason,
         priority: c.priority,
-        score: c.score.is_finite().then_some(c.score as f64),
+        score: c.score.is_finite().then_some(c.score),
         cost_bytes: c.cost,
         data_bytes: c.data_bytes,
         uploaded_bytes: c.uploaded,
@@ -970,7 +975,7 @@ fn deletion_batch(
                     "Disk watermark".to_string()
                 },
                 priority: c.priority,
-                score: c.score.is_finite().then_some(c.score as f64),
+                score: c.score.is_finite().then_some(c.score),
                 estimated_reclaimed_bytes: c.cost,
                 uploaded_bytes: c.uploaded,
                 seeding_days: c.days as f64,

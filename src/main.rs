@@ -48,16 +48,16 @@ struct Pool {
 /// Trackers you care about. Unlisted trackers have priority 0. When graine has to delete,
 /// lower priority goes first no matter the score; equal priority is ranked by score.
 #[derive(Deserialize)]
-struct TrackerPriority {
-    /// Matched as a substring of the torrent's tracker URL, e.g. "tracker.example.org".
-    host: String,
+struct TrackerGroup {
+    name: String,
+    hosts: Vec<String>,
     priority: i32,
 }
 
 #[derive(Deserialize)]
 struct Config {
     #[serde(default)]
-    trackers: Vec<TrackerPriority>,
+    trackers: Vec<TrackerGroup>,
     url: String,
     /// Any path on the filesystem that holds downloads and library.
     disk_path: String,
@@ -334,11 +334,23 @@ fn pool_of(cfg: &Config, category: &str) -> Option<usize> {
         .position(|p| p.categories.iter().any(|c| c == base))
 }
 
+fn tracker_group<'a>(cfg: &'a Config, tracker: &str) -> Option<&'a TrackerGroup> {
+    let host = tracker_host(tracker);
+
+    cfg.trackers.iter().find(|group| {
+        group
+            .hosts
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(&host))
+    })
+}
+
+fn tracker_label(cfg: &Config, tracker: &str) -> String {
+    tracker_group(cfg, tracker).map_or_else(|| tracker_host(tracker), |group| group.name.clone())
+}
+
 fn tracker_priority(cfg: &Config, tracker: &str) -> i32 {
-    cfg.trackers
-        .iter()
-        .find(|t| tracker.contains(&t.host))
-        .map_or(0, |t| t.priority)
+    tracker_group(cfg, tracker).map_or(0, |group| group.priority)
 }
 
 /// Use the tracker hostname as the stable aggregation key, not the announce URL.
@@ -902,7 +914,7 @@ fn cluster_dashboard_row(cfg: &Config, tag: &str, c: &Cluster, is_dry: bool) -> 
     let mut tracker_hosts: Vec<String> = c
         .torrents
         .iter()
-        .map(|t| tracker_host(&t.tracker))
+        .map(|t| tracker_label(cfg, &tracker_host(&t.tracker)))
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
@@ -954,7 +966,7 @@ fn deletion_batch(
             let mut tracker_hosts: Vec<String> = c
                 .torrents
                 .iter()
-                .map(|t| tracker_host(&t.tracker))
+                .map(|t| tracker_label(cfg, &tracker_host(&t.tracker)))
                 .collect::<HashSet<_>>()
                 .into_iter()
                 .collect();
@@ -995,8 +1007,27 @@ fn deletion_batch(
     }
 }
 
-fn tracker_rows(trackers: HashMap<String, TrackerAnalytics>) -> Vec<TrackerRow> {
-    let mut rows: Vec<TrackerRow> = trackers
+fn tracker_rows(trackers: HashMap<String, TrackerAnalytics>, cfg: &Config) -> Vec<TrackerRow> {
+    let mut grouped: HashMap<String, TrackerAnalytics> = HashMap::new();
+
+    for (host, values) in trackers {
+        let label = tracker_label(cfg, &host);
+        let totals = grouped.entry(label).or_default();
+
+        totals
+            .total
+            .add(values.total.uploaded_bytes, values.total.downloaded_bytes);
+        totals.regular.add(
+            values.regular.uploaded_bytes,
+            values.regular.downloaded_bytes,
+        );
+        totals.cross_seed.add(
+            values.cross_seed.uploaded_bytes,
+            values.cross_seed.downloaded_bytes,
+        );
+    }
+
+    let mut rows: Vec<TrackerRow> = grouped
         .into_iter()
         .map(|(tracker, values)| TrackerRow {
             tracker,
@@ -1005,23 +1036,25 @@ fn tracker_rows(trackers: HashMap<String, TrackerAnalytics>) -> Vec<TrackerRow> 
             cross_seed: values.cross_seed,
         })
         .collect();
+
     rows.sort_by(|a, b| {
         b.total
             .uploaded_bytes
             .cmp(&a.total.uploaded_bytes)
             .then(a.tracker.cmp(&b.tracker))
     });
+
     rows
 }
 
-fn all_time_period(state: &AnalyticsState) -> AnalyticsPeriod {
+fn all_time_period(state: &AnalyticsState, cfg: &Config) -> AnalyticsPeriod {
     let torrents = state
         .torrents
         .iter()
         .map(|(hash, t)| LeaderboardEntry {
             hash: hash.clone(),
             name: t.name.clone(),
-            tracker: t.tracker.clone(),
+            tracker: tracker_label(cfg, &t.tracker),
             category: t.category.clone(),
             is_cross_seed: t.category.ends_with(CROSS_SUFFIX),
             uploaded_bytes: t.all_time_uploaded_bytes,
@@ -1030,12 +1063,17 @@ fn all_time_period(state: &AnalyticsState) -> AnalyticsPeriod {
         })
         .collect();
     AnalyticsPeriod {
-        trackers: tracker_rows(state.trackers.clone()),
+        trackers: tracker_rows(state.trackers.clone(), cfg),
         torrents,
     }
 }
 
-fn activity_period(events: &[ActivityEvent], start: u64, now: u64) -> AnalyticsPeriod {
+fn activity_period(
+    events: &[ActivityEvent],
+    start: u64,
+    now: u64,
+    cfg: &Config,
+) -> AnalyticsPeriod {
     let mut trackers: HashMap<String, TrackerAnalytics> = HashMap::new();
     let mut torrents: HashMap<String, LeaderboardEntry> = HashMap::new();
     let mut seen = HashSet::new();
@@ -1063,7 +1101,7 @@ fn activity_period(events: &[ActivityEvent], start: u64, now: u64) -> AnalyticsP
             .or_insert_with(|| LeaderboardEntry {
                 hash: event.hash.clone(),
                 name: event.name.clone(),
-                tracker: event.tracker.clone(),
+                tracker: tracker_label(cfg, &event.tracker),
                 category: event.category.clone(),
                 is_cross_seed: event.is_cross_seed,
                 uploaded_bytes: 0,
@@ -1071,7 +1109,7 @@ fn activity_period(events: &[ActivityEvent], start: u64, now: u64) -> AnalyticsP
                 timestamp: event.timestamp,
             });
         torrent.name = event.name.clone();
-        torrent.tracker = event.tracker.clone();
+        torrent.tracker = tracker_label(cfg, &event.tracker);
         torrent.category = event.category.clone();
         torrent.is_cross_seed = event.is_cross_seed;
         torrent.uploaded_bytes = torrent.uploaded_bytes.saturating_add(event.uploaded_bytes);
@@ -1081,7 +1119,7 @@ fn activity_period(events: &[ActivityEvent], start: u64, now: u64) -> AnalyticsP
         torrent.timestamp = torrent.timestamp.max(event.timestamp);
     }
     AnalyticsPeriod {
-        trackers: tracker_rows(trackers),
+        trackers: tracker_rows(trackers, cfg),
         torrents: torrents.into_values().collect(),
     }
 }
@@ -1091,6 +1129,7 @@ fn build_periods(
     stored_events: &[ActivityEvent],
     current_events: &[ActivityEvent],
     now: u64,
+    cfg: &Config,
 ) -> HashMap<String, AnalyticsPeriod> {
     let mut events = stored_events.to_vec();
     // In --dry mode current deltas are not persisted, but showing them in the generated page
@@ -1098,10 +1137,13 @@ fn build_periods(
     events.extend_from_slice(current_events);
     let (week, month, year) = period_starts(now);
     HashMap::from([
-        ("all".to_string(), all_time_period(state)),
-        ("year".to_string(), activity_period(&events, year, now)),
-        ("month".to_string(), activity_period(&events, month, now)),
-        ("week".to_string(), activity_period(&events, week, now)),
+        ("all".to_string(), all_time_period(state, cfg)),
+        ("year".to_string(), activity_period(&events, year, now, cfg)),
+        (
+            "month".to_string(),
+            activity_period(&events, month, now, cfg),
+        ),
+        ("week".to_string(), activity_period(&events, week, now, cfg)),
     ])
 }
 
@@ -1443,7 +1485,13 @@ fn main() {
         deletions.drain(0..excess);
     }
 
-    let mut periods = build_periods(&analytics, &stored_activity, &current_activity, timestamp);
+    let mut periods = build_periods(
+        &analytics,
+        &stored_activity,
+        &current_activity,
+        timestamp,
+        &cfg,
+    );
     // Ensure all four period keys are present, even on a completely new installation.
     for key in ["all", "year", "month", "week"] {
         periods.entry(key.to_string()).or_insert(AnalyticsPeriod {

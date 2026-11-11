@@ -1309,8 +1309,6 @@ fn main() {
             continue;
         }
         if cluster.is_grace {
-            pool_used_for_cap[cluster.pool] =
-                pool_used_for_cap[cluster.pool].saturating_add(cluster.cost);
             kept.push(("(GRACE)", cluster));
             continue;
         }

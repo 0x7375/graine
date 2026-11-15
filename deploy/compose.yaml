@@ -1,0 +1,11 @@
+services:
+  graine:
+    image: ghcr.io/0x7375/graine:latest
+    container_name: graine
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./data:/var/lib/graine
+      - ./config.toml:/etc/graine/config.toml:ro
+      - ./qbittorrent-password:/run/secrets/qbittorrent-password:ro
+      - /data/shared:/data/shared:ro

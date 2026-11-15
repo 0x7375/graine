@@ -1,0 +1,37 @@
+# Local development config. No qBittorrent connection or periodic worker is started.
+url = "http://127.0.0.1:8080" # ignored when fixture_path is set
+disk_path = "./fixtures/disk"
+high_watermark = 0.85
+low_watermark = 0.82
+grace_days = 7
+managed_categories = ["autobrr", "sonarr", "radarr"]
+hide_unconfigured_trackers = true
+
+# Dashboard/API only: never run scans when the backend starts.
+management_enabled = false
+interval_seconds = 3600
+listen = "127.0.0.1:3000"
+
+# Server state is separate from production and can be deleted to re-import legacy files.
+database_path = "./data/dev.sqlite3"
+legacy_data_dir = "./data/legacy"
+
+# Local fixture mode is read-only. It always forces a dry run and cannot delete torrents.
+fixture_path = "./fixtures/qbittorrent.json"
+dry_run = true
+
+# Tracker groups used by the imported activity and sample fixture.
+[[trackers]]
+name = "V3X"
+hosts = ["tk.v3x.tw", "announce.v3x.club"]
+priority = 10
+
+[[trackers]]
+name = "C411"
+hosts = ["c411.org", "tk.c411.tw"]
+priority = 10
+
+[[trackers]]
+name = "TR4KER"
+hosts = ["tk.tr4ker.net"]
+priority = 10

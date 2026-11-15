@@ -1,0 +1,35 @@
+# Example for Linux Docker / Compose (network_mode: host)
+url = "http://127.0.0.1:8080" # replace with qBittorrent WebUI port
+password_file = "/run/secrets/qbittorrent-password"
+disk_path = "/data/shared"
+high_watermark = 0.85
+low_watermark = 0.82
+grace_days = 7
+managed_categories = ["autobrr", "sonarr", "radarr"]
+hide_unconfigured_trackers = true
+interval_seconds = 3600
+
+listen = "0.0.0.0:3000"
+web_dir = "/opt/graine/web"
+database_path = "/var/lib/graine/graine.sqlite3"
+legacy_data_dir = "/var/lib/graine/legacy"
+
+# First deployment: dashboard only. Enable after checking the imported history.
+management_enabled = false
+# Set false only after a successful dry-run on the actual server.
+dry_run = true
+
+[[trackers]]
+name = "V3X"
+hosts = ["tk.v3x.tw", "announce.v3x.club"]
+priority = 10
+
+[[trackers]]
+name = "C411"
+hosts = ["c411.org", "tk.c411.tw"]
+priority = 10
+
+[[trackers]]
+name = "TR4KER"
+hosts = ["tk.tr4ker.net"]
+priority = 10

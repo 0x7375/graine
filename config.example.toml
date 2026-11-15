@@ -1,0 +1,37 @@
+# qBittorrent Web API. In remote development, forward this port over SSH and use 127.0.0.1.
+url = "http://127.0.0.1:8080"
+
+# Filesystem that Graine manages against.
+disk_path = "/data/shared"
+high_watermark = 0.85
+low_watermark = 0.82
+grace_days = 7
+managed_categories = ["autobrr", "sonarr", "radarr"]
+hide_unconfigured_trackers = true
+
+# Run immediately when the server starts, then at this interval.
+# Defaults to 3600 seconds (one hour) when omitted.
+interval_seconds = 3600
+
+# Axum API and production frontend.
+listen = "127.0.0.1:3000"
+web_dir = "./web/dist"
+
+# Persistent application state and one-time legacy import source.
+database_path = "./data/graine.sqlite3"
+legacy_data_dir = "./data/legacy"
+
+# The file contains only the qBittorrent password. Alternatively pass --password-file.
+password_file = "./secrets/qbittorrent-password"
+
+# Enable the periodic worker (defaults to true).
+management_enabled = true
+
+# Set true for preview-only operation. Live mode is the default when omitted.
+dry_run = true
+
+# Add one block per logical private tracker group.
+# [[trackers]]
+# name = "Tracker"
+# hosts = ["tracker.example", "announce.tracker.example"]
+# priority = 10

@@ -4,31 +4,28 @@ use crate::{
     qbittorrent::{ConnectionInfo, get_torrent_files},
     util::DAY_IN_SEC,
 };
+use anyhow::{Context, Result, bail};
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     fs,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    process::{Command, exit},
+    process::Command,
 };
 
 /// `(used, total)` bytes of the filesystem holding `path`, like `df` reports them.
-pub(crate) fn disk_usage(path: &str) -> (u64, u64) {
+pub(crate) fn disk_usage(path: &str) -> Result<(u64, u64)> {
     let output = Command::new("df")
         .args(["-B1", "--output=used,avail", path])
         .output()
-        .unwrap_or_else(|error| {
-            eprintln!("Cannot run df: {error}");
-            exit(1);
-        });
+        .context("cannot run df")?;
 
     if !output.status.success() {
-        eprintln!(
+        bail!(
             "df failed for {path}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        exit(1);
     }
 
     let text = String::from_utf8_lossy(&output.stdout);
@@ -41,19 +38,19 @@ pub(crate) fn disk_usage(path: &str) -> (u64, u64) {
                 _ => None,
             }
         })
-        .unwrap_or_else(|| {
-            eprintln!("Cannot parse df output for {path}");
-            exit(1);
-        })
+        .with_context(|| format!("cannot parse df output for {path}"))
 }
 
 /// Files of a torrent with their on-disk identity. An API failure aborts the run
 /// (nothing gets deleted); a torrent whose files cannot be read is skipped.
-pub(crate) fn torrent_files(conn: &ConnectionInfo, torrent: &Torrent) -> Option<Vec<FileRef>> {
-    let files = get_torrent_files(conn, &torrent.hash);
+pub(crate) fn torrent_files(
+    conn: &ConnectionInfo,
+    torrent: &Torrent,
+) -> Result<Option<Vec<FileRef>>> {
+    let files = get_torrent_files(conn, &torrent.hash)?;
     if files.is_empty() {
         eprintln!("WARN: no file list for {}, skipping", torrent.name);
-        return None;
+        return Ok(None);
     }
 
     let mut output = Vec::with_capacity(files.len());
@@ -75,17 +72,17 @@ pub(crate) fn torrent_files(conn: &ConnectionInfo, torrent: &Torrent) -> Option<
                     path.display(),
                     torrent.name
                 );
-                return None;
+                return Ok(None);
             }
         }
     }
 
     if output.is_empty() {
         eprintln!("WARN: no file of {} exists on disk, skipping", torrent.name);
-        return None;
+        return Ok(None);
     }
 
-    Some(output)
+    Ok(Some(output))
 }
 
 /// Path-compressed union-find lookup.
@@ -208,4 +205,106 @@ pub(crate) fn compare_clusters(a: &Cluster, b: &Cluster) -> Ordering {
         .cmp(&a.is_grace)
         .then(b.priority.cmp(&a.priority))
         .then(b.score.total_cmp(&a.score))
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{config::Config, model::FileRef};
+
+    fn config() -> Config {
+        toml::from_str(
+            r#"
+            url = "http://localhost:8080"
+            disk_path = "/data/shared"
+            managed_categories = ["radarr", "sonarr"]
+            grace_days = 7
+
+            [[trackers]]
+            name = "Low"
+            hosts = ["low.example"]
+            priority = 2
+
+            [[trackers]]
+            name = "High"
+            hosts = ["high.example"]
+            priority = 10
+            "#,
+        )
+        .expect("test config should deserialize")
+    }
+
+    fn entry(
+        hash: &str,
+        category: &str,
+        added_on: u64,
+        seeding_time: u64,
+        uploaded: u64,
+        tracker: &str,
+        inode: u64,
+        hardlinks: u64,
+        path: &str,
+    ) -> Entry {
+        Entry {
+            torrent: Torrent {
+                hash: hash.to_string(),
+                name: hash.to_string(),
+                category: category.to_string(),
+                save_path: "/data/shared".to_string(),
+                progress: 1.0,
+                seeding_time,
+                added_on,
+                last_activity: crate::util::now_unix(),
+                uploaded,
+                downloaded: 0,
+                tracker: format!("https://{tracker}/announce"),
+            },
+            files: vec![FileRef {
+                dev: 1,
+                ino: inode,
+                nlink: hardlinks,
+                size: 100,
+                allocated_bytes: 80,
+                path: PathBuf::from(path),
+            }],
+        }
+    }
+
+    #[test]
+    fn cluster_keeps_existing_cost_category_grace_priority_and_score_semantics() {
+        let cfg = config();
+        let cluster = build_cluster(
+            &cfg,
+            vec![
+                entry("radarr", "radarr", 10, 10 * DAY_IN_SEC, 1_000, "low.example", 7, 2, "/data/shared/a"),
+                entry("sonarr", "sonarr", 20, 2 * DAY_IN_SEC, 2_000, "high.example", 7, 2, "/data/shared/b"),
+            ],
+        );
+
+        assert_eq!(cluster.category, "radarr");
+        assert!(cluster.is_grace);
+        assert_eq!(cluster.priority, 10);
+        assert_eq!(cluster.cost, 100);
+        assert_eq!(cluster.data_bytes, 100);
+        assert_eq!(cluster.disk_bytes, 80);
+        assert_eq!(cluster.protected_disk_bytes, 0);
+        assert_eq!(cluster.uploaded, 3_000);
+        assert!((cluster.score - 11.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn externally_hardlinked_cluster_has_zero_reclaimable_cost() {
+        let cluster = build_cluster(
+            &config(),
+            vec![
+                entry("a", "radarr", 10, 10 * DAY_IN_SEC, 1_000, "low.example", 7, 3, "/data/shared/a"),
+                entry("b", "radarr.cross", 20, 10 * DAY_IN_SEC, 2_000, "low.example", 7, 3, "/data/shared/b"),
+            ],
+        );
+
+        assert_eq!(cluster.cost, 0);
+        assert_eq!(cluster.protected_disk_bytes, 80);
+        assert!(cluster.score.is_infinite());
+    }
 }

@@ -1,0 +1,19 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Semantic colour variables are generated from Tailwind's palette in tailwind.config.js. */
+@layer base {
+  * { @apply border-border; }
+  html { font-feature-settings: "cv02", "cv03", "cv04", "cv11"; font-kerning: normal; }
+  body { @apply bg-background text-foreground antialiased; min-width: 320px; margin: 0; line-height: 1.6; }
+  button, input, select { font: inherit; }
+  ::selection { background: rgb(var(--primary-rgb) / 0.2); }
+}
+
+@layer utilities {
+  .font-mono { font-variant-numeric: tabular-nums lining-nums; }
+}
+
+.recharts-cartesian-axis-tick-value { fill: var(--muted-foreground); }
+.recharts-tooltip-cursor { stroke: var(--border); }

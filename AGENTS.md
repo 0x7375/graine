@@ -2,64 +2,48 @@
 
 ## Purpose
 
-Graine is a Rust command-line service that manages completed qBittorrent torrents to maximize useful private-tracker seeding while keeping filesystem usage below configured limits. It periodically ranks related torrents, identifies which deletions can actually reclaim disk space, removes the least valuable eligible clusters when the filesystem crosses its high watermark, and generates a static dashboard.
+Graine manages completed qBittorrent torrents to maximize useful private-tracker seeding while keeping filesystem usage below configured limits. It periodically ranks related torrents, identifies which deletions can reclaim disk space, removes the least valuable eligible clusters when the filesystem crosses its high watermark, and exposes a dashboard.
 
-Incomplete torrents are intentionally outside Graine's ranking and deletion logic. They remain under the configured download client's / Cleanuparr workflow.
+Incomplete torrents are intentionally outside Graine's ranking and deletion logic. They remain under the download client's / Cleanuparr workflow.
 
 ## Stack
 
-- **Language/runtime:** Rust, built as a single CLI binary.
-- **Configuration:** TOML parsed with `toml` and Serde.
-- **Serialization/state:** Serde + `serde_json`; append-only JSON Lines (`.jsonl`) for activity, disk history, and deletion history.
-- **qBittorrent integration:** qBittorrent Web API over HTTP using `ureq`.
-- **Filesystem accounting:** Unix/Linux metadata (`dev`, inode, hardlink count, file length, allocated blocks) and `df` for actual filesystem usage.
-- **Dashboard:** static HTML, CSS, and vanilla JavaScript. Rust embeds the assets at compile time with `include_str!`, injects serialized dashboard data into the HTML template, and writes the files to `/var/www/graine/` for Nginx to serve.
-- **Deployment:** packaged and scheduled through the user's NixOS configuration. Keep the repository's existing `Cargo.toml`, `Cargo.lock`, and Nix packaging unless a task explicitly changes them.
+- Rust, Axum, Tokio and ureq for the single backend service.
+- React, TypeScript, Vite, Tailwind CSS, shadcn/ui and Lucide for the frontend.
+- SQLite via rusqlite for persistent state, activity, history, deletion batches and the latest dashboard payload.
+- Unix/Linux filesystem metadata (`dev`, inode, hardlink count, file length, allocated blocks) and `df` for actual filesystem usage.
+- `web/dist` is built by pnpm and served by Axum through tower-http. Node.js is not a runtime dependency.
 
 ## Source layout
 
 ```text
 src/
-  main.rs                 # CLI parsing and end-to-end orchestration
-  config.rs               # TOML schema, validation, category/tracker matching
-  model.rs                # Shared domain, persisted-state, and dashboard types
-  util.rs                 # Time/date helpers, JSONL I/O, atomic writes, constants
-  qbittorrent.rs          # qBittorrent authentication, queries, and deletion API
-  storage.rs              # df, file metadata, inode clustering, reclaimable cost, score
-  analytics.rs            # Persistent counters, transfer events, period aggregation
-  dashboard.rs            # Dashboard row/history conversion and static asset generation
-  dashboard/
-    index.html
-    style.css
-    app.js
+  main.rs          # CLI, configuration loading, service startup
+  server.rs        # Axum routes, static frontend serving and worker scheduler
+  engine.rs        # One complete management cycle; orchestration only
+  config.rs        # TOML schema, defaults, validation, tracker matching
+  model.rs         # Domain, persisted-state and API/dashboard types
+  db.rs            # SQLite schema, legacy JSONL import, persistence
+  qbittorrent.rs   # qBittorrent authentication/API plus read-only local JSON fixture source
+  storage.rs       # df, file metadata, inode clustering, reclaimable cost and score
+  analytics.rs     # Counters, transfer events, periods and leaderboard calculations
+  dashboard.rs     # Domain-to-dashboard row/history adapters
+web/
+  src/             # React and TypeScript application
+  components.json  # shadcn/ui configuration
 ```
 
-### Module responsibilities
+## Runtime and scheduling
 
-- `main.rs` loads and validates configuration, authenticates to qBittorrent, filters managed categories, tracks analytics, builds inode-connected clusters, applies disk watermarks, performs deletions unless `--dry` is set, records history, and generates the dashboard.
-- `config.rs` defines the global settings and tracker groups. It maps `.cross` categories to their base category, checks whether a torrent is managed, normalizes tracker hosts, resolves logical tracker labels/priorities, and decides whether a tracker appears in statistics.
-- `model.rs` contains shared structs. Keep serialized field changes backward compatible where possible; use Serde defaults or aliases when old state files must remain readable.
-- `util.rs` contains shared constants and infrastructure helpers: Unix time, week/month/year boundaries, atomic file replacement, and JSONL append/read.
-- `qbittorrent.rs` is the only module that should own qBittorrent HTTP endpoint calls.
-- `storage.rs` reads filesystem metadata, discovers torrent files, builds clusters based on `(device, inode)`, computes reclaimable and protected storage, scores clusters, and defines best-first ordering.
-- `analytics.rs` updates lifetime counters and observed transfer deltas, persists analytics/activity state, filters unconfigured trackers from statistics, and builds leaderboard and tracker time-series data.
-- `dashboard.rs` converts domain objects to dashboard records and embeds `dashboard/index.html`, `style.css`, and `app.js` into generated static files.
+The default configuration path is `/etc/graine/config.toml`; `--config PATH` overrides it. The qBittorrent password is read from `password_file`, overridden by `--password-file PATH`; `QBIT_PW` remains a compatibility fallback.
 
-## Configuration and retention rules
+When `management_enabled` is true, the worker runs immediately at service startup and then every `interval_seconds` (default 3600). A single sequential worker owns the cycle; it never starts a second cycle while the first is still executing. Missed intervals are skipped. Set `management_enabled = false` for dashboard-only development; `--once` still explicitly executes one cycle and exits. `dry_run` and `--dry` preview decisions without deleting torrents or persisting analytics, activity events or history.
 
-The current configuration model has:
+`fixture_path` selects a local JSON qBittorrent snapshot with torrent and per-hash file records. Fixture mode must always force dry-run, validate that every fixture file resolves beneath `disk_path`, avoid qBittorrent HTTP/password access, and refuse deletion. Keep fixture paths relative to the local fixture root. `scripts/init-fixtures.sh` creates actual local hardlinks; do not replace inode values with fake JSON metadata.
 
-- `url`: qBittorrent Web UI base URL.
-- `disk_path`: path on the filesystem whose usage Graine manages against.
-- `high_watermark` / `low_watermark`: fractions in `[0, 1]`; `low_watermark` must be lower than `high_watermark`.
-- `grace_days`: one global grace period shared by all managed categories (default 7 days).
-- `managed_categories`: allowlist of qBittorrent categories Graine manages. A `<category>.cross` category is included automatically.
-- `trackers`: logical tracker groups (`name`, `hosts`, `priority`). Multiple announce hosts can map to one logical tracker.
-- `hide_unconfigured_trackers`: by default, unconfigured trackers remain managed but are omitted from tracker analytics/graphs and the torrent leaderboard.
+The Axum server starts independently of qBittorrent availability. API requests read the most recently stored dashboard payload and never initiate a torrent scan.
 
-There are no pools and no per-category or per-tracker grace periods. Do not reintroduce pool capacity logic unless the design explicitly changes.
-
-Retention invariants:
+## Retention invariants — do not change without explicit instruction
 
 1. Only complete managed torrents (`progress >= 1.0`) are inspected and ranked.
 2. Torrents sharing any inode are joined into one cluster. Deletion decisions apply to the entire cluster, including cross-seeds sharing hardlinked data.
@@ -70,41 +54,46 @@ Retention invariants:
 7. Best-first order is: grace-protected first, then higher tracker priority, then higher score. Eviction walks that order in reverse.
 8. The global filesystem watermark is the only storage limit. If `df` usage exceeds `high_watermark`, Graine evicts eligible clusters until projected usage reaches `low_watermark`. Grace clusters and clusters with `cost == 0` cannot be evicted.
 9. Tracker priority affects ranking order; unconfigured tracker priority defaults to zero. Hiding unconfigured trackers is a presentation/analytics filter, not a torrent-management filter.
-10. `--dry` must not persist analytics, append history/deletion events, or delete torrents. The generated dashboard may include current-run preview data.
+10. Dry runs must not persist analytics, append activity/history/deletion records, or delete torrents. The latest dashboard preview may be exposed to the frontend.
 
-The score currently sums each member torrent's lifetime upload-per-seeding-day estimate, applies a per-torrent inactivity factor `1 / (1 + inactive_days / 7)`, and divides by cluster reclaimable cost. A zero-cost cluster receives an infinite score because it cannot reclaim storage. Keep score semantics and priority/grace ordering changes explicit and test them with representative cluster cases.
+The score sums each member torrent's lifetime upload-per-seeding-day estimate, applies a per-torrent inactivity factor `1 / (1 + inactive_days / 7)`, and divides by cluster reclaimable cost. A zero-cost cluster receives an infinite score because it cannot reclaim storage. Do not alter score formulas or sorting semantics during presentation/backend migration.
 
 ## Persistent data
 
-The JSON/JSONL files are relative to the process working directory:
+The SQLite database stores:
 
-- `analytics.json`: all-time per-tracker and per-torrent counters, last-seen counters, and tracking start time.
-- `activity.jsonl`: timestamped qBittorrent upload/download counter deltas. Event IDs are used to deduplicate retries.
-- `history.jsonl`: one disk-usage snapshot per live run, including category usage for the stacked disk chart.
-- `deletions.jsonl`: deletion batches and per-cluster metadata; observed `df` reclamation belongs to the batch, not to an individual cluster.
+- `analytics_state`: lifetime tracker and torrent counters and last-seen counters.
+- `activity_events`: observed qBittorrent upload/download deltas, deduplicated by event ID.
+- `history_snapshots`: full disk-usage snapshots including category usage for the stacked disk chart.
+- `deletion_batches`: deletion batches and per-cluster metadata; observed `df` reclamation belongs to the batch, not an individual cluster.
+- `latest_dashboard`: most recent dashboard response served by the API.
 
-Compatibility matters: old history records may lack `category_usage`; old deletion records may use the former `pool` field, accepted as an alias for `category`. Do not silently discard existing analytics/history on parse or version errors.
+At startup, `db.rs` imports `analytics.json`, `activity.jsonl`, `history.jsonl` and `deletions.jsonl` from `legacy_data_dir` in a single transaction. If no source files exist, defer the import marker so files can be copied later. Once any source exists, copy all available source files before startup; the import is guarded by a metadata marker and leaves source files untouched. Invalid or unsupported records stop import; never silently discard them. Existing compatibility rules remain: old history may lack `category_usage`, and old deletion records may use `pool` as an alias for `category`. When no current dashboard exists, `engine.rs` seeds a historical dashboard from the imported activity/analytics/history/deletion data. Legacy exports do not include a current torrent ranking, so do not invent one.
 
-## Dashboard data and behavior
+## Dashboard contract
 
-- Dashboard data is serialized by Rust and exposed as `window.GRAINE_DATA` in `index.html`.
-- `app.js` renders all charts, metrics, ranking, leaderboard, and eviction history. Keep DOM IDs in `index.html` synchronized with selectors in `app.js`.
-- The tracker graph is cumulative net upload by configured tracker group. It supports total, regular, and cross-seed net metrics, with all-time/year/month/week periods. The all-time series starts from the observed lifetime-counter baseline and then adds timestamped daily deltas; transfer dates before Graine began observing counters cannot be reconstructed.
-- The stacked disk chart shows Radarr, Sonarr, Autobrr, and Other. Category values use allocated blocks from completed torrent clusters, deduplicated by inode. `Other` is the remainder of actual `df` usage and therefore includes incomplete torrents, unmanaged files, and data not attributed to completed managed clusters. Old snapshots without category attribution are shown as Other/unclassified.
-- Do not re-add the obsolete pool-capacity display or the reclaimed-this-run overview metric without an explicit request.
+Rust owns all calculations. React renders the API payload and does not reimplement torrent scoring, ranking, filesystem accounting or eviction decisions.
+
+Preserve the following information and visual semantics:
+
+- General statistics and current run status.
+- Torrent ranking as a table, including cluster, tracker, category, status, priority, score, cost, data size, uploaded bytes, seeding days and torrent/cross-seed counts.
+- Historical disk usage as a stacked area/line chart with Radarr, Sonarr, Autobrr and Other/unclassified attribution, plus high/low watermark references.
+- Tracker performance as a cumulative net-transfer line chart with total, regular and cross-seed metrics, and all/year/month/week periods.
+- All-time and period torrent leaderboards as sortable/comparable table data.
+- Eviction history with cluster details, estimated reclamation and observed batch-level reclamation.
+
+The stacked disk chart uses allocated blocks from completed torrent clusters, deduplicated by inode. `Other` is the remainder of actual `df` usage and includes incomplete torrents, unmanaged files and data not attributed to completed managed clusters. Old snapshots without category attribution are shown as Other/unclassified.
 
 ## Development and verification
 
-From the repository root:
+- `pnpm --dir web dev` starts Vite with API proxying to Axum at `127.0.0.1:3000` by default.
+- `config.dev.toml` disables the periodic worker and points at local SQLite, legacy-data and fixture paths.
+- Use `scripts/import-legacy.sh /path/to/copied/server/state` to copy old state files into `data/legacy/` before starting the backend.
+- Use `scripts/init-fixtures.sh` then `cargo run -- --config config.dev.toml --once --dry` to exercise the full Rust cycle against local files and real hardlinks.
+- Start the dashboard-only backend with `watchexec --restart --watch src --watch Cargo.toml --watch config.dev.toml -- cargo run -- --config config.dev.toml`; use `pnpm --dir web dev` for Vite.
+- Never point fixture mode at production data and never test eviction against a real qBittorrent instance.
+- `pnpm --dir web typecheck` and `pnpm --dir web build` verify the frontend.
+- `cargo fmt --check`, `cargo check`, `cargo test` and `cargo clippy --all` verify Rust.
 
-```sh
-cargo fmt --check
-cargo clippy --all
-cargo test
-node --check src/dashboard/app.js
-node test-dashboard.js  # if the smoke-test script is present
-```
-
-Run the checks available in the current environment and report clearly which were not run. The Rust code uses Unix-specific filesystem metadata and expects `df` to be available. Do not claim cross-platform support without changing that design.
-
-When changing the dashboard, verify that its embedded asset paths still match the `include_str!` declarations in `dashboard.rs` and that the Nix derivation includes the entire `src/dashboard/` directory. When changing persisted structs, consider upgrades from existing JSON/JSONL files before deploying.
+The source dump used to reconstruct this working tree did not include `Cargo.lock`; generate and commit a fresh lockfile using the project's Rust toolchain before deployment.

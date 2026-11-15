@@ -23,7 +23,7 @@ impl Torrent {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(crate) struct ApiFile {
     pub(crate) name: String,
 }
@@ -223,6 +223,7 @@ pub(crate) struct DashboardData {
     pub(crate) protected_bytes: u64,
     pub(crate) ranking: Vec<DashboardCluster>,
     pub(crate) periods: HashMap<String, AnalyticsPeriod>,
+    pub(crate) rank_changes: HashMap<String, HashMap<String, i32>>,
     pub(crate) deletions: Vec<DeletionBatch>,
 }
 
@@ -256,3 +257,4 @@ pub(crate) struct Cluster {
     pub(crate) score: f64,
     pub(crate) rank: usize,
 }
+

@@ -1,0 +1,62 @@
+{
+  "torrents": [
+    {
+      "hash": "1111111111111111111111111111111111111111",
+      "name": "Fixture Movie A",
+      "category": "radarr",
+      "save_path": "radarr/movie-a",
+      "progress": 1.0,
+      "seeding_time": 2592000,
+      "added_on": 1791221280,
+      "last_activity": 1794504480,
+      "uploaded": 536870912000,
+      "downloaded": 75161927680,
+      "tracker": "https://tk.v3x.tw/announce"
+    },
+    {
+      "hash": "2222222222222222222222222222222222222222",
+      "name": "Fixture Movie A (cross-seed)",
+      "category": "radarr.cross",
+      "save_path": "sonarr/cross-a",
+      "progress": 1.0,
+      "seeding_time": 1209600,
+      "added_on": 1792517280,
+      "last_activity": 1794418080,
+      "uploaded": 268435456000,
+      "downloaded": 0,
+      "tracker": "https://announce.v3x.club/announce"
+    },
+    {
+      "hash": "3333333333333333333333333333333333333333",
+      "name": "Fixture Episode B",
+      "category": "sonarr",
+      "save_path": "sonarr/episode-b",
+      "progress": 1.0,
+      "seeding_time": 3456000,
+      "added_on": 1790357280,
+      "last_activity": 1792949280,
+      "uploaded": 12884901888,
+      "downloaded": 2147483648,
+      "tracker": "https://tk.c411.tw/announce"
+    },
+    {
+      "hash": "4444444444444444444444444444444444444444",
+      "name": "Fixture Autobrr Pack",
+      "category": "autobrr",
+      "save_path": "autobrr/pack-c",
+      "progress": 1.0,
+      "seeding_time": 1036800,
+      "added_on": 1791653280,
+      "last_activity": 1792085280,
+      "uploaded": 4294967296,
+      "downloaded": 1073741824,
+      "tracker": "https://tk.tr4ker.net/announce"
+    }
+  ],
+  "files": {
+    "1111111111111111111111111111111111111111": [{ "name": "movie.mkv" }],
+    "2222222222222222222222222222222222222222": [{ "name": "movie.mkv" }],
+    "3333333333333333333333333333333333333333": [{ "name": "episode.mkv" }],
+    "4444444444444444444444444444444444444444": [{ "name": "sample.bin" }]
+  }
+}

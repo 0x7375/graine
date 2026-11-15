@@ -1,0 +1,16 @@
+.git
+.github
+/target
+/data
+/secrets
+/fixtures
+/web/node_modules
+/web/dist
+/web/.vite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.jsonl
+analytics.json
+.env
+.env.*

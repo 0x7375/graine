@@ -5,15 +5,9 @@ use crate::{
         TorrentAnalytics, TrackerAnalytics, TrackerHistoryPoint, TrackerHistoryTotals,
         TransferTotals,
     },
-    util::{
-        ACTIVITY_FILE, ANALYTICS_FILE, ANALYTICS_VERSION, DAY_IN_SEC, append_jsonl, atomic_write,
-        now_unix, period_starts,
-    },
+    util::{ANALYTICS_VERSION, DAY_IN_SEC, now_unix, period_starts},
 };
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    process::exit,
-};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 fn add_tracker_totals(
     trackers: &mut HashMap<String, TrackerAnalytics>,
@@ -37,43 +31,15 @@ fn counter_delta(current: u64, previous: u64) -> u64 {
     current.checked_sub(previous).unwrap_or(current)
 }
 
-fn load_analytics() -> AnalyticsState {
-    let content = match std::fs::read_to_string(ANALYTICS_FILE) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return AnalyticsState::default();
-        }
-        Err(error) => {
-            eprintln!("Cannot read {ANALYTICS_FILE}: {error}");
-            exit(1);
-        }
-    };
-
-    let state: AnalyticsState = serde_json::from_str(&content).unwrap_or_else(|error| {
-        eprintln!("Cannot parse {ANALYTICS_FILE}: {error}; refusing to reset analytics history");
-        exit(1);
-    });
-
-    if state.version != 0 && state.version != 1 && state.version != ANALYTICS_VERSION {
-        eprintln!(
-            "Unsupported analytics version {} (expected {}); refusing to overwrite it",
-            state.version, ANALYTICS_VERSION
-        );
-        exit(1);
-    }
-
-    state
-}
-
-/// Update all-time counters and append observed deltas. All-time counters are seeded from
-/// qBittorrent's lifetime counters on first observation. Period rankings begin at installation;
-/// old lifetime traffic is not falsely attributed to the current week/month/year.
+/// Update all-time counters and return observed deltas. Persistence is owned by the SQLite
+/// layer so dry runs can calculate a preview without modifying stored state. All-time counters
+/// are seeded from qBittorrent's lifetime counters on first observation. Period rankings begin
+/// at installation; old lifetime traffic is not falsely attributed to the current week/month/year.
 pub(crate) fn track_analytics(
     torrents: &[Torrent],
-    is_dry: bool,
+    mut state: AnalyticsState,
 ) -> (AnalyticsState, Vec<ActivityEvent>) {
     let now = now_unix();
-    let mut state = load_analytics();
     if state.tracking_started_at == 0 {
         state.tracking_started_at = now;
     }
@@ -188,16 +154,7 @@ pub(crate) fn track_analytics(
         }
     }
 
-    if !is_dry {
-        // Write the log first. If saving state fails, a retry may append the same event again;
-        // event_id deduplication during aggregation prevents double counting.
-        append_jsonl(ACTIVITY_FILE, &events);
-        let json = serde_json::to_vec_pretty(&state).unwrap_or_else(|error| {
-            eprintln!("Cannot serialize {ANALYTICS_FILE}: {error}");
-            exit(1);
-        });
-        atomic_write(ANALYTICS_FILE, &json);
-    }
+
 
     (state, events)
 }
@@ -439,3 +396,4 @@ pub(crate) fn build_periods(
         ("week".to_string(), activity_period(&events, week, now, cfg)),
     ])
 }
+

@@ -1,12 +1,8 @@
 use crate::{
     config::{Config, tracker_host, tracker_label},
-    model::{
-        Cluster, DashboardCluster, DashboardData, DeletionBatch, DeletionEvent, HistorySnapshot,
-    },
-    util::{DASHBOARD_FILE, atomic_write},
+    model::{Cluster, DashboardCluster, DeletionBatch, DeletionEvent, HistorySnapshot},
 };
-use serde::Serialize;
-use std::{collections::HashSet, process::exit};
+use std::collections::HashSet;
 
 pub(crate) fn cluster_dashboard_row(
     cfg: &Config,
@@ -167,27 +163,3 @@ pub(crate) fn history_snapshot(
     }
 }
 
-fn html_safe_json<T: Serialize>(value: &T) -> String {
-    let json = serde_json::to_string(value).unwrap_or_else(|error| {
-        eprintln!("Cannot serialize dashboard data: {error}");
-        exit(1);
-    });
-
-    json.replace('&', "\\u0026")
-        .replace('<', "\\u003c")
-        .replace('>', "\\u003e")
-        .replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029")
-}
-
-pub(crate) fn generate_dashboard(data: &DashboardData) {
-    let json = html_safe_json(data);
-    let html = DASHBOARD_HTML.replace("__GRAINE_DATA__", &json);
-    atomic_write(DASHBOARD_FILE, html.as_bytes());
-    atomic_write("/var/www/graine/style.css", DASHBOARD_CSS.as_bytes());
-    atomic_write("/var/www/graine/app.js", DASHBOARD_JS.as_bytes());
-}
-
-const DASHBOARD_HTML: &str = include_str!("dashboard/index.html");
-const DASHBOARD_CSS: &str = include_str!("dashboard/style.css");
-const DASHBOARD_JS: &str = include_str!("dashboard/app.js");

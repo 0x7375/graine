@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::path::PathBuf;
 
 fn default_high() -> f64 {
     0.85
@@ -16,6 +17,26 @@ fn default_hide_unconfigured_trackers() -> bool {
     true
 }
 
+fn default_interval_seconds() -> u64 {
+    60 * 60
+}
+
+fn default_management_enabled() -> bool {
+    true
+}
+
+fn default_listen() -> String {
+    "127.0.0.1:3000".to_string()
+}
+
+fn default_database_path() -> PathBuf {
+    PathBuf::from("/var/lib/graine/graine.sqlite3")
+}
+
+fn default_legacy_data_dir() -> PathBuf {
+    PathBuf::from("/var/lib/graine")
+}
+
 /// A logical private-tracker group. Multiple announce hosts can share one dashboard identity.
 #[derive(Clone, Deserialize)]
 pub(crate) struct TrackerGroup {
@@ -24,7 +45,7 @@ pub(crate) struct TrackerGroup {
     pub(crate) priority: i32,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(crate) struct Config {
     #[serde(default)]
     pub(crate) trackers: Vec<TrackerGroup>,
@@ -44,6 +65,39 @@ pub(crate) struct Config {
     pub(crate) grace_days: u64,
     /// qBittorrent categories managed by Graine. A category's `.cross` variant is included too.
     pub(crate) managed_categories: Vec<String>,
+
+    /// Management cycle period. Defaults to one hour.
+    #[serde(default = "default_interval_seconds")]
+    pub(crate) interval_seconds: u64,
+    /// Axum bind address.
+    #[serde(default = "default_listen")]
+    pub(crate) listen: String,
+    /// SQLite database path.
+    #[serde(default = "default_database_path")]
+    pub(crate) database_path: PathBuf,
+    /// Directory containing analytics.json and the legacy JSONL files to import once.
+    #[serde(default = "default_legacy_data_dir")]
+    pub(crate) legacy_data_dir: PathBuf,
+    /// Path to a file containing the qBittorrent password. Can be overridden by --password-file.
+    #[serde(default)]
+    pub(crate) password_file: Option<PathBuf>,
+    /// Enable the periodic management worker. Disable this for dashboard-only development.
+    #[serde(default = "default_management_enabled")]
+    pub(crate) management_enabled: bool,
+    /// Optional local qBittorrent snapshot for offline development and tests.
+    /// Fixture mode always forces dry-run and refuses torrent deletion.
+    #[serde(default)]
+    pub(crate) fixture_path: Option<PathBuf>,
+    /// Run management in preview mode. This does not persist analytics/history or delete torrents.
+    #[serde(default)]
+    pub(crate) dry_run: bool,
+    /// Directory containing Vite's production build. In development Vite serves the frontend.
+    #[serde(default = "default_web_dir")]
+    pub(crate) web_dir: PathBuf,
+}
+
+fn default_web_dir() -> PathBuf {
+    PathBuf::from("web/dist")
 }
 
 impl Config {
@@ -65,6 +119,22 @@ impl Config {
             .any(|category| category.trim().is_empty())
         {
             return Err("managed_categories cannot contain empty names".to_string());
+        }
+
+        if self.interval_seconds == 0 {
+            return Err("interval_seconds must be greater than zero".to_string());
+        }
+
+        if self.listen.trim().is_empty() {
+            return Err("listen cannot be empty".to_string());
+        }
+
+        if self.url.trim().is_empty() {
+            return Err("url cannot be empty".to_string());
+        }
+
+        if self.disk_path.trim().is_empty() {
+            return Err("disk_path cannot be empty".to_string());
         }
 
         Ok(())
@@ -130,4 +200,24 @@ pub(crate) fn tracker_priority(cfg: &Config, tracker: &str) -> i32 {
 
 pub(crate) fn tracker_is_visible(cfg: &Config, tracker: &str) -> bool {
     !cfg.hide_unconfigured_trackers || tracker_group(cfg, tracker).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn management_interval_defaults_to_one_hour() {
+        let config: Config = toml::from_str(
+            r#"
+            url = "http://localhost:8080"
+            disk_path = "/data/shared"
+            managed_categories = ["radarr"]
+            "#,
+        )
+        .expect("minimal config should deserialize with defaults");
+
+        assert_eq!(config.interval_seconds, 3600);
+        assert!(config.management_enabled);
+    }
 }

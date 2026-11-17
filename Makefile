@@ -1,4 +1,4 @@
-.PHONY: devshell init-fixtures backend-dev fixture-run frontend-dev build check
+.PHONY: devshell init-fixtures fixture-check backend-dev fixture-backend-dev fixture-run frontend-dev build check
 
 devshell:
 	nix develop
@@ -6,13 +6,20 @@ devshell:
 init-fixtures:
 	./scripts/init-fixtures.sh
 
+fixture-check:
+	python3 scripts/check-fixtures.py
+
 # Dashboard-only backend: management_enabled=false in config.dev.toml.
 backend-dev:
 	watchexec --restart --watch src --watch Cargo.toml --watch config.dev.toml -- cargo run -- --config config.dev.toml
 
-# Run one read-only fixture scan to populate current ranking and disk calculations.
-fixture-run: init-fixtures
-	cargo run -- --config config.dev.toml --once --dry
+# Fresh synthetic dataset and history, entirely separate from data/dev.sqlite3.
+fixture-run: init-fixtures fixture-check
+	cargo run -- --config config.fixture.toml --once --dry
+
+# Serve the synthetic dashboard for UI development (terminal 1).
+fixture-backend-dev:
+	watchexec --restart --watch src --watch Cargo.toml --watch config.fixture.toml -- cargo run -- --config config.fixture.toml
 
 frontend-dev:
 	cd web && pnpm dev

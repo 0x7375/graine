@@ -17,12 +17,12 @@ interval_seconds = 3600
 listen = "127.0.0.1:3000"
 web_dir = "./web/dist"
 
-# Persistent application state and one-time legacy import source.
+# Persistent SQLite application state.
 database_path = "./data/graine.sqlite3"
-legacy_data_dir = "./data/legacy"
 
 # The file contains only the qBittorrent password. Alternatively pass --password-file.
 password_file = "./secrets/qbittorrent-password"
+# Required for real qBittorrent management; dashboard-only mode can start without it.
 
 # Enable the periodic worker (defaults to true).
 management_enabled = true

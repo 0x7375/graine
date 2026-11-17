@@ -32,6 +32,17 @@ export type HistorySnapshot = {
   category_usage: Record<string, number>;
 };
 
+export type DashboardMember = {
+  name: string;
+  tracker: string;
+  category: string;
+  is_cross_seed: boolean;
+  uploaded_bytes: number;
+  seeding_days: number;
+  inactive_days: number;
+  adjusted_upload_per_day?: number;
+};
+
 export type DashboardCluster = {
   rank: number;
   name: string;
@@ -48,6 +59,8 @@ export type DashboardCluster = {
   seeding_days: number;
   torrent_count: number;
   cross_seed_count: number;
+  grace_remaining_seconds?: number;
+  members?: DashboardMember[];
 };
 
 export type LeaderboardEntry = {
@@ -79,6 +92,7 @@ export type AnalyticsPeriod = {
 
 export type DeletionEvent = {
   name: string;
+  cross_seed_count?: number;
   torrent_names: string[];
   tracker_hosts: string[];
   category: string;
@@ -107,8 +121,29 @@ export type DashboardData = {
   ranking: DashboardCluster[];
   periods: Record<PeriodKey, AnalyticsPeriod>;
   rank_changes?: Partial<Record<PeriodKey, Record<string, number>>>;
+  rank_baselines_at?: Partial<Record<PeriodKey, number>>;
   deletions: DeletionBatch[];
 };
 
 export type TrackerMetric = "total_net_bytes" | "regular_net_bytes" | "cross_seed_net_bytes";
 export type PeriodKey = "all" | "year" | "month" | "week";
+
+export type ManagementRun = {
+  id: number;
+  started_at: number;
+  finished_at: number | null;
+  duration_ms: number | null;
+  trigger: "scheduled" | "manual" | "once" | "archive";
+  mode: "live" | "dry" | "fixture" | "historical";
+  status: "running" | "ok" | "over_limit" | "error" | "interrupted" | "historical";
+  summary: (RunSummary & {
+    planned_torrents?: number;
+    planned_clusters?: number;
+    removed_torrents?: number;
+    removed_clusters?: number;
+    deletion_batch_id?: string | null;
+  }) | null;
+  snapshot: HistorySnapshot | null;
+  deletion_batch: DeletionBatch | null;
+  error: string | null;
+};

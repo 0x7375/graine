@@ -1,80 +1,58 @@
-# Graine: generic Docker deployment (Linux / NixOS / UGREEN OS)
+# Deploy graine with Docker Compose
 
-## Build and publishing
+This directory is an example deployment for Linux Docker or Podman hosts, including NixOS and UGREEN NAS devices that provide a Docker/Compose environment.
 
-Commit `Dockerfile`, `.dockerignore`, `.github/workflows/docker.yml`, `Cargo.lock` and
-`web/pnpm-lock.yaml` in the GitHub repository. Push to `main`. GitHub Actions publishes
-`ghcr.io/<owner>/<repo>:latest`. The two lockfiles are required for reproducible builds.
-If missing locally, run `cargo generate-lockfile` and `cd web && pnpm install` first.
+## Prepare the host
 
-## First deployment
+Copy `compose.yaml` and `config.toml` to a persistent folder and edit the following:
 
-Copy this `deploy` directory to the machine running qBittorrent. Replace the image name
-in `compose.yaml`, if needed. Adjust `config.toml`: especially qBittorrent URL, trackers,
-and disk_path. For qBittorrent on the same Linux machine, `network_mode: host` means
-`127.0.0.1` refers to the host. For remote qBittorrent, use its reachable address.
+- `url`: qBittorrent's WebUI address, reachable from the container.
+- `disk_path`: actual filesystem containing downloads.
+- Bind mount: the **paths returned by qBittorrent** must exist inside the container at the same absolute location, including hardlinked files.
+- `trackers` and `managed_categories`: match your own setup.
+- Password: save the WebUI password alone in `qbittorrent-password`, then `chmod 600 qbittorrent-password`.
 
-This example assumes the *same absolute file paths* inside and outside the container,
-`/data/shared`. If qBittorrent saves elsewhere on UGREEN OS, adapt both sides of
-that volume mapping and `disk_path`. Paths from qBittorrent's API must remain valid
-inside the container. The bind is intentionally read-only: Graine only stats files;
-qBittorrent deletes its own data via its API. **Read-only does not prevent an API
-request from deleting torrents.**
+The example uses `network_mode: host` on Linux. This allows `127.0.0.1` in `config.toml` to refer to qBittorrent on the same host. For an isolated Docker network, remove host networking, make qBittorrent reachable by the container, change `listen` to `0.0.0.0:3000`, and publish the web port only to the desired host interface (for example `127.0.0.1:3000:3000` behind a host reverse proxy).
 
-Run from the deploy directory:
+## First start
 
 ```sh
-mkdir -p data/legacy
+mkdir -p data
 chmod 700 data
-printf '%s\n' 'YOUR_QBITTORRENT_WEBUI_PASSWORD' > qbittorrent-password
-chmod 600 qbittorrent-password
-# Stop the OLD timer/service before the final data copy and never run both workers.
-# Copy analytics.json, activity.jsonl, history.jsonl and deletions.jsonl
-# from the server to data/legacy/ (not into Git).
+# Edit config.toml and create qbittorrent-password before starting.
 docker compose pull
 docker compose up -d
 docker compose logs -f graine
-curl -f http://127.0.0.1:3000/api/health
 ```
 
-The first start imports legacy data to SQLite and serves the dashboard, **without
-running the management worker** (`management_enabled = false`). The original JSONL
-files are retained. The server's clock and the filesystem's accounting are unchanged.
-
-## Controlled testing, then enable the worker
+The example config disables the **scheduled worker** (`management_enabled = false`) and enables **dry-run** (`dry_run = true`). The manual run API/button remains available but cannot delete while dry-run is enabled. It will serve data in `data/graine.sqlite3` if a database is present. For a new installation with an empty database, start with a **one-off dry run** to generate a preview:
 
 ```sh
-# Preview a single run (no deletion; fixture mode must NOT be enabled in production):
 docker compose run --rm graine --config /etc/graine/config.toml --once --dry
 ```
 
-Review logs; note that `--dry` does not persist new snapshots. Afterwards, change
-`management_enabled = true` but keep `dry_run = true`, then restart and inspect the
-new logs. Finally set `dry_run = false` and restart when ready. The worker runs once
-at startup, then every `interval_seconds` (default 3600 seconds).
+After inspecting the ranking and logs, enable `management_enabled = true` while keeping `dry_run = true`. The worker runs once at startup and then every `interval_seconds` (default one hour). Only set `dry_run = false` after validating decisions. Apply configuration changes with `docker compose up -d --force-recreate`.
+
+**Never run an old management service or timer and the new container simultaneously.** No JSONL migration is needed; SQLite is the source of truth.
+
+## Upgrade and backups
 
 ```sh
-docker compose up -d --force-recreate
+docker compose pull
+docker compose up -d
 ```
 
-For upgrades:
+Persist `./data` across container upgrades. Back up SQLite using `.backup`, not a plain copy of the active database file if WAL transactions may be pending:
 
 ```sh
-docker compose pull && docker compose up -d
+sqlite3 data/graine.sqlite3 ".backup '/path/to/graine-backup.sqlite3'"
 ```
 
-## Important caveats
+Use a destination directory writable by the user running the command. The exported database can also be used as `data/dev.sqlite3` on a development computer.
 
-- `network_mode: host` works on Linux Docker hosts, including typical NixOS/UGREEN OS
-  setups; it is not universally equivalent on Docker Desktop. The HTTP service binds
-  to all host interfaces on port 3000; apply firewall rules or a reverse proxy with
-  authentication rather than exposing it publicly. For access only through a proxy,
-  consider binding the app to `127.0.0.1:3000` instead.
-- Keep `data/`, `qbittorrent-password`, and config files with secrets out of Git.
-- SQLite and its WAL/SHM files must live on a persistent local filesystem. Back up
-  using the SQLite backup API or `sqlite3 ... '.backup ...'`, not by copying the
-  live DB file alone.
-- Ensure `df` and file metadata in the container refer to the same underlying
-  physical filesystem as qBittorrent. Never substitute SSHFS for this purpose.
-- On hardware other than x86_64, configure multi-architecture GitHub Actions builds.
-  The included workflow builds linux/amd64 on the default GitHub runner.
+## Safety and portability
+
+- `POST /api/run` is **unauthenticated** and can trigger deletions. Keep the dashboard on a trusted network or behind an authenticated reverse proxy; do not expose host port 3000 publicly without access control.
+- `/data/shared` is mounted **read-only** in the example because Graine reads metadata. qBittorrent still performs deletions through its API; the mount does **not** prevent them.
+- Use a local Linux filesystem for correct inode and hardlink metadata. Graine supports ext4 and Btrfs for its logical accounting; Btrfs reflinks, compression and snapshots may affect actual physical space freed.
+- The example image tag is `latest` and the default GitHub Actions build targets `linux/amd64`. For ARM NAS systems, build an `arm64` image or extend the workflow to publish a multi-architecture image.

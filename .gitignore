@@ -5,3 +5,5 @@
 /web/dist/
 /web/.vite/
 /fixtures/disk/
+
+/fixtures/qbittorrent.generated.json

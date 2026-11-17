@@ -12,9 +12,8 @@ interval_seconds = 3600
 listen = "0.0.0.0:3000"
 web_dir = "/opt/graine/web"
 database_path = "/var/lib/graine/graine.sqlite3"
-legacy_data_dir = "/var/lib/graine/legacy"
 
-# First deployment: dashboard only. Enable after checking the imported history.
+# First deployment: dashboard only. Enable after checking the SQLite history.
 management_enabled = false
 # Set false only after a successful dry-run on the actual server.
 dry_run = true

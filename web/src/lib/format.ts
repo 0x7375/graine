@@ -18,14 +18,37 @@ export function formatNetBytes(value: number | null | undefined): string {
   return `${sign}${formatBytes(Math.abs(value))}`;
 }
 
+// Use European day/month/year ordering in both UI languages.
+// Set the locale explicitly: falling back to the browser default can produce MM/DD/YYYY.
+function dateLocale(language: Language): string {
+  return language === "fr" ? "fr-FR" : "en-GB";
+}
+
 export function formatDate(timestamp: number | null | undefined, language: Language = "en"): string {
   if (!timestamp) return "—";
-  return new Date(timestamp * 1000).toLocaleString(language === "fr" ? "fr-FR" : undefined);
+  const date = new Date(timestamp * 1000);
+  const parts = new Intl.DateTimeFormat(dateLocale(language), {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const value = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
+  return `${value("day")}/${value("month")}/${value("year")} ${value("hour")}:${value("minute")}`;
 }
 
 export function formatShortDate(timestamp: number | null | undefined, language: Language = "en"): string {
   if (!timestamp) return "—";
-  return new Date(timestamp * 1000).toLocaleDateString(language === "fr" ? "fr-FR" : undefined);
+  const parts = new Intl.DateTimeFormat(dateLocale(language), {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).formatToParts(new Date(timestamp * 1000));
+  const value = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
+  return `${value("day")}/${value("month")}/${value("year")}`;
 }
 
 export function formatPercent(value: number | null | undefined): string {

@@ -94,36 +94,56 @@ pub(crate) fn find(parent: &mut [usize], mut index: usize) -> usize {
     index
 }
 
+struct InodeData {
+    nlink: u64,
+    size: u64,
+    allocated_bytes: u64,
+    paths: HashSet<PathBuf>,
+}
+
+/// Per-torrent contribution to a cluster's score, before the shared cost divisor.
+/// Keep the ranking calculation and dashboard breakdown on exactly the same formula.
+pub(crate) fn adjusted_upload_per_day(torrent: &Torrent, now: u64) -> f64 {
+    let seeded_days = (torrent.seeding_time as f64 / DAY_IN_SEC as f64).max(1.0);
+    let inactive_days = now.saturating_sub(torrent.last_activity) as f64 / DAY_IN_SEC as f64;
+    (torrent.uploaded as f64 / seeded_days) / (1.0 + inactive_days / 7.0)
+}
+
 pub(crate) fn build_cluster(cfg: &Config, entries: Vec<Entry>) -> Cluster {
     // inode -> (hardlink count, logical size, allocated bytes, distinct cluster paths)
-    let mut inodes: HashMap<(u64, u64), (u64, u64, u64, HashSet<PathBuf>)> = HashMap::new();
+    let mut inodes: HashMap<(u64, u64), InodeData> = HashMap::new();
     for entry in &entries {
         for file in &entry.files {
             inodes
                 .entry((file.dev, file.ino))
-                .or_insert((file.nlink, file.size, file.allocated_bytes, HashSet::new()))
-                .3
+                .or_insert_with(|| InodeData {
+                    nlink: file.nlink,
+                    size: file.size,
+                    allocated_bytes: file.allocated_bytes,
+                    paths: HashSet::new(),
+                })
+                .paths
                 .insert(file.path.clone());
         }
     }
 
     let data_bytes = inodes
         .values()
-        .map(|(_, size, _, _)| *size)
+        .map(|inode| inode.size)
         .fold(0_u64, u64::saturating_add);
     let cost = inodes
         .values()
-        .filter(|(nlink, _, _, paths)| paths.len() as u64 >= *nlink)
-        .map(|(_, size, _, _)| *size)
+        .filter(|inode| inode.paths.len() as u64 >= inode.nlink)
+        .map(|inode| inode.size)
         .fold(0_u64, u64::saturating_add);
     let disk_bytes = inodes
         .values()
-        .map(|(_, _, allocated_bytes, _)| *allocated_bytes)
+        .map(|inode| inode.allocated_bytes)
         .fold(0_u64, u64::saturating_add);
     let protected_disk_bytes = inodes
         .values()
-        .filter(|(nlink, _, _, paths)| (paths.len() as u64) < *nlink)
-        .map(|(_, _, allocated_bytes, _)| *allocated_bytes)
+        .filter(|inode| (inode.paths.len() as u64) < inode.nlink)
+        .map(|inode| inode.allocated_bytes)
         .fold(0_u64, u64::saturating_add);
 
     let uploaded = entries
@@ -150,26 +170,20 @@ pub(crate) fn build_cluster(cfg: &Config, entries: Vec<Entry>) -> Cluster {
     let category = base_category(&category_entry.torrent.category).to_string();
 
     let grace_seconds = cfg.grace_days.saturating_mul(DAY_IN_SEC);
-    let is_grace = if anchors.is_empty() {
-        entries
-            .iter()
-            .any(|entry| entry.torrent.seeding_time < grace_seconds)
+    // The least-seeded anchor determines when the entire cluster leaves grace.
+    // Cross-seeds do not extend grace while an original torrent exists.
+    let least_seeding_time = if anchors.is_empty() {
+        entries.iter().map(|entry| entry.torrent.seeding_time).min()
     } else {
-        anchors
-            .iter()
-            .any(|entry| entry.torrent.seeding_time < grace_seconds)
-    };
+        anchors.iter().map(|entry| entry.torrent.seeding_time).min()
+    }.unwrap_or(0);
+    let grace_remaining_seconds = grace_seconds.saturating_sub(least_seeding_time);
+    let is_grace = grace_remaining_seconds > 0;
 
     let now = crate::util::now_unix();
     let upload_rate: f64 = entries
         .iter()
-        .map(|entry| {
-            let seeding_days = (entry.torrent.seeding_time as f64 / DAY_IN_SEC as f64).max(1.0);
-            let inactive_days =
-                now.saturating_sub(entry.torrent.last_activity) as f64 / DAY_IN_SEC as f64;
-            let activity_factor = 1.0 / (1.0 + inactive_days / 7.0);
-            (entry.torrent.uploaded as f64 / seeding_days) * activity_factor
-        })
+        .map(|entry| adjusted_upload_per_day(&entry.torrent, now))
         .sum();
 
     let score = if cost == 0 {
@@ -194,6 +208,7 @@ pub(crate) fn build_cluster(cfg: &Config, entries: Vec<Entry>) -> Cluster {
         uploaded,
         days,
         is_grace,
+        grace_remaining_seconds,
         score,
         rank: 0,
     }
@@ -284,6 +299,7 @@ mod tests {
 
         assert_eq!(cluster.category, "radarr");
         assert!(cluster.is_grace);
+        assert_eq!(cluster.grace_remaining_seconds, 5 * DAY_IN_SEC);
         assert_eq!(cluster.priority, 10);
         assert_eq!(cluster.cost, 100);
         assert_eq!(cluster.data_bytes, 100);
@@ -291,6 +307,20 @@ mod tests {
         assert_eq!(cluster.protected_disk_bytes, 0);
         assert_eq!(cluster.uploaded, 3_000);
         assert!((cluster.score - 11.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn cross_seed_does_not_extend_grace_of_a_mature_original() {
+        let cfg = config();
+        let cluster = build_cluster(
+            &cfg,
+            vec![
+                entry("original", "radarr", 10, 12 * DAY_IN_SEC, 1000, "low.example", 2, 2, "/data/shared/a"),
+                entry("cross", "radarr.cross", 20, DAY_IN_SEC, 1000, "high.example", 2, 2, "/data/shared/b"),
+            ],
+        );
+        assert!(!cluster.is_grace);
+        assert_eq!(cluster.grace_remaining_seconds, 0);
     }
 
     #[test]
@@ -306,5 +336,6 @@ mod tests {
         assert_eq!(cluster.cost, 0);
         assert_eq!(cluster.protected_disk_bytes, 80);
         assert!(cluster.score.is_infinite());
+        assert_eq!(cluster.grace_remaining_seconds, 0);
     }
 }

@@ -56,10 +56,6 @@
 
           shellHook = ''
             export RUST_BACKTRACE=1
-            echo "Graine development environment"
-            echo "Rust: $(rustc --version)"
-            echo "Node: $(node --version)"
-            echo "pnpm: $(pnpm --version)"
           '';
         };
       });

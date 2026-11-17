@@ -109,6 +109,9 @@ pub(crate) struct HistorySnapshot {
 #[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct DeletionEvent {
     pub(crate) name: String,
+    /// Optional for deletion batches recorded before this field was introduced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cross_seed_count: Option<usize>,
     pub(crate) torrent_names: Vec<String>,
     pub(crate) tracker_hosts: Vec<String>,
     /// `pool` is accepted for compatibility with older deletion history records.
@@ -177,6 +180,19 @@ pub(crate) struct AnalyticsPeriod {
 }
 
 #[derive(Serialize)]
+pub(crate) struct DashboardMember {
+    pub(crate) name: String,
+    pub(crate) tracker: String,
+    pub(crate) category: String,
+    pub(crate) is_cross_seed: bool,
+    pub(crate) uploaded_bytes: u64,
+    pub(crate) seeding_days: f64,
+    pub(crate) inactive_days: f64,
+    /// Contribution to the group's score before division by the common cost.
+    pub(crate) adjusted_upload_per_day: f64,
+}
+
+#[derive(Serialize)]
 pub(crate) struct DashboardCluster {
     pub(crate) rank: usize,
     pub(crate) name: String,
@@ -193,9 +209,11 @@ pub(crate) struct DashboardCluster {
     pub(crate) seeding_days: f64,
     pub(crate) torrent_count: usize,
     pub(crate) cross_seed_count: usize,
+    pub(crate) grace_remaining_seconds: u64,
+    pub(crate) members: Vec<DashboardMember>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct RunSummary {
     pub(crate) timestamp: u64,
     pub(crate) mode: String,
@@ -212,6 +230,31 @@ pub(crate) struct RunSummary {
     pub(crate) managed_torrents: usize,
     pub(crate) complete_torrents: usize,
     pub(crate) clusters: usize,
+    #[serde(default)]
+    pub(crate) planned_torrents: usize,
+    #[serde(default)]
+    pub(crate) planned_clusters: usize,
+    #[serde(default)]
+    pub(crate) removed_torrents: usize,
+    #[serde(default)]
+    pub(crate) removed_clusters: usize,
+    #[serde(default)]
+    pub(crate) deletion_batch_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub(crate) struct ManagementRun {
+    pub(crate) id: i64,
+    pub(crate) started_at: u64,
+    pub(crate) finished_at: Option<u64>,
+    pub(crate) duration_ms: Option<u64>,
+    pub(crate) trigger: String,
+    pub(crate) mode: String,
+    pub(crate) status: String,
+    pub(crate) summary: Option<RunSummary>,
+    pub(crate) snapshot: Option<HistorySnapshot>,
+    pub(crate) deletion_batch: Option<DeletionBatch>,
+    pub(crate) error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -224,6 +267,7 @@ pub(crate) struct DashboardData {
     pub(crate) ranking: Vec<DashboardCluster>,
     pub(crate) periods: HashMap<String, AnalyticsPeriod>,
     pub(crate) rank_changes: HashMap<String, HashMap<String, i32>>,
+    pub(crate) rank_baselines_at: HashMap<String, u64>,
     pub(crate) deletions: Vec<DeletionBatch>,
 }
 
@@ -254,6 +298,7 @@ pub(crate) struct Cluster {
     pub(crate) uploaded: u64,
     pub(crate) days: f32,
     pub(crate) is_grace: bool,
+    pub(crate) grace_remaining_seconds: u64,
     pub(crate) score: f64,
     pub(crate) rank: usize,
 }

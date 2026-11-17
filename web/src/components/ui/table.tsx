@@ -1,12 +1,61 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
-const Table = React.forwardRef<HTMLTableElement, React.HTMLAttributes<HTMLTableElement>>(
-  ({ className, ...props }, ref) => (
-    <div className="relative w-full overflow-auto">
-      <table ref={ref} className={cn("w-full caption-bottom text-sm", className)} {...props} />
-    </div>
-  ),
+type TableProps = React.HTMLAttributes<HTMLTableElement> & {
+  containerClassName?: string;
+  visibleRows?: number;
+};
+
+const Table = React.forwardRef<HTMLTableElement, TableProps>(
+  ({ className, containerClassName, visibleRows, ...props }, forwardedRef) => {
+    const internalRef = React.useRef<HTMLTableElement>(null);
+    const [maxHeight, setMaxHeight] = React.useState<number | undefined>();
+
+    // Measure ten complete rows plus part of the next row to suggest scrolling.
+    React.useLayoutEffect(() => {
+      const table = internalRef.current;
+      if (!table || !visibleRows) return;
+      const header = table.querySelector("thead");
+      const completeRows = Math.floor(visibleRows);
+      const partialRow = visibleRows - completeRows;
+      const rows = Array.from(table.querySelectorAll("tbody > tr:not([data-ranking-details])"));
+      const measure = () => {
+        if (rows.length <= completeRows) {
+          setMaxHeight((previous) => previous === undefined ? previous : undefined);
+          return;
+        }
+        // Sum the actual heights of the visible primary rows, not their viewport
+        // positions: expanded detail rows must remain inside a fixed scroll area.
+        const headerHeight = header?.getBoundingClientRect().height ?? 0;
+        const completeHeight = rows.slice(0, completeRows).reduce(
+          (sum, row) => sum + row.getBoundingClientRect().height, 0,
+        );
+        const nextHeight = rows[completeRows]?.getBoundingClientRect().height ?? 0;
+        const height = Math.ceil(headerHeight + completeHeight + nextHeight * partialRow);
+        setMaxHeight((previous) => previous === height ? previous : height);
+      };
+      measure();
+      const observer = new ResizeObserver(measure);
+      if (header) observer.observe(header);
+      rows.slice(0, visibleRows).forEach((row) => observer.observe(row));
+      return () => observer.disconnect();
+    });
+
+    const setRef = (element: HTMLTableElement | null) => {
+      internalRef.current = element;
+      if (typeof forwardedRef === "function") forwardedRef(element);
+      else if (forwardedRef) forwardedRef.current = element;
+    };
+
+    return (
+      <div
+        className={cn("relative w-full overflow-auto", containerClassName)}
+        style={{ maxHeight, overflowAnchor: "none" }}
+      >
+        <table ref={setRef} className={cn("w-full caption-bottom text-sm", className)} {...props} />
+      </div>
+    );
+  },
 );
 Table.displayName = "Table";
 

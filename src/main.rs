@@ -12,7 +12,7 @@ mod util;
 use anyhow::{Context, Result, bail};
 use config::Config;
 use db::Database;
-use std::{env, fs, path::PathBuf};
+use std::{env, fs, path::PathBuf, time::Instant};
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/graine/config.toml";
@@ -42,20 +42,28 @@ async fn main() -> Result<()> {
     }
     config.validate().map_err(anyhow::Error::msg)?;
 
-    let database = Database::new(
-        config.database_path.clone(),
-        config.legacy_data_dir.clone(),
-    );
+    let database = Database::new(config.database_path.clone());
     database.initialize()?;
-    engine::seed_dashboard_from_legacy(&config, &database)?;
 
     if cli.once {
-        let password = if config.fixture_path.is_some() {
-            None
-        } else {
-            Some(load_password(&config)?)
-        };
-        let dashboard = engine::run_management_cycle(&config, &database, password.as_deref(), cli.dry)?;
+        let mode = if config.fixture_path.is_some() { "fixture" }
+            else if config.dry_run || cli.dry { "dry" } else { "live" };
+        let record_id = database.begin_management_run("once", mode, util::now_unix())?;
+        let start = Instant::now();
+        let result = (|| {
+            let password = if config.fixture_path.is_some() {
+                None
+            } else {
+                Some(load_password(&config)?)
+            };
+            engine::run_management_cycle(&config, &database, password.as_deref(), cli.dry)
+        })();
+        if let Err(error) = database.finish_management_run(
+            record_id, start.elapsed().as_millis() as u64, &result,
+        ) {
+            tracing::error!(error = %error, "cannot record one-shot cycle");
+        }
+        let dashboard = result?;
         if dashboard.run.result == "over_limit" {
             std::process::exit(2);
         }
@@ -74,7 +82,7 @@ pub(crate) fn load_password(config: &Config) -> Result<String> {
             "qBittorrent password is missing; set password_file in config, pass --password-file, or set QBIT_PW",
         )?
     };
-    let password = password.trim_end_matches(|character| character == '\r' || character == '\n').to_string();
+    let password = password.trim_end_matches(['\r', '\n']).to_string();
     if password.is_empty() {
         bail!("qBittorrent password is empty");
     }

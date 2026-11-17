@@ -1,139 +1,131 @@
-# Graine
+# graine
 
-Graine is a Rust torrent-management service with an Axum API and a React dashboard. Rust remains responsible for qBittorrent interaction, torrent scoring, hardlink-aware storage accounting, retention ranking, and eviction decisions. React only renders API data.
+Graine manages completed qBittorrent torrents under a filesystem-wide storage limit. It ranks inode-linked torrent groups, protects recent seeds, removes eligible low-ranking groups when the disk fills up, and serves a web dashboard.
 
-## Local development without the server filesystem
+The Rust service handles the qBittorrent API, filesystem metadata, retention decisions, SQLite persistence and an hourly worker. Axum serves the API and compiled React frontend from the same process. The frontend uses React, TypeScript, Vite, Tailwind CSS and shadcn/ui.
 
-The repository has two separate local workflows. Neither needs `/data/shared`, a qBittorrent password, an SSH tunnel, or access to the production server.
+## How it works
 
-### 1. Dashboard development using the server's historical data
+- Only **completed torrents** in `managed_categories` are managed. `<category>.cross` is automatically included.
+- Torrents sharing a hardlinked file are grouped into **one cluster**, including cross-seeds. A cluster is the unit of ranking and eviction.
+- **Cost** is the logical size of unique inodes whose hardlinks are all accounted for within the cluster. Files with external hardlinks are not considered reclaimable. Graine does not count the same file once per cross-seed.
+- A cluster remains in **grace** while any original (non-cross-seed) has seeded for fewer than `grace_days`. If there are no originals, all members are considered. Grace clusters are not evicted.
+- The order is grace protection first, then configured tracker priority, then score. Score uses lifetime upload rate adjusted for inactivity, divided by reclaimable logical size. Zero-cost groups are never evicted.
+- Graine uses `df` to determine overall filesystem occupancy. Above `high_watermark`, it evicts eligible groups, worst first, until projected usage reaches `low_watermark` or no more eligible groups remain.
 
-Copy the old application state files into `data/legacy/`. From the old Graine working directory on your machine:
+**Storage caveat:** reclaimable *logical* bytes are not a promise of physical blocks freed. Hardlinks are deduplicated, but Btrfs reflinks, compression and snapshots can affect actual free space. The filesystem's occupancy is measured independently with `df`. Graine is designed for Linux with ext4 or Btrfs; ZFS-specific accounting is not implemented.
 
-```sh
-./scripts/import-legacy.sh /path/to/copied/server/state
-```
+## Dashboard
 
-The script copies any of these files that are present:
+- **Overview:** tracker net-upload history (total / regular / cross-seed), searchable ranking, per-cluster details and grace indicator.
+- **Storage:** current usage and stacked category history (Radarr, Sonarr, Autobrr and unclassified).
+- **Leaderboard:** up to 100 torrents for the selected period, including deleted torrents retained in SQLite. Rank changes compare with the previous run for *All time* or the first recorded baseline of the current week/month/year.
+- **History:** scheduled, manual and command-line runs, including their outcome, duration and linked torrent deletions. Filter by **All**, **Deletions** or **Errors**. Older SQLite snapshots remain available as archived entries.
 
-- `analytics.json`
-- `activity.jsonl`
-- `history.jsonl`
-- `deletions.jsonl`
+The interface follows the browser language (French or English) and light/dark preference. Its refresh icon **starts a management cycle**, not just a page reload; it disables while one is running. The automatic worker and manual action cannot overlap.
 
-Alternatively, place them manually in `data/legacy/`. The SQLite import runs on startup. It is transactional and idempotent; source files are never modified. If no legacy files exist yet, Graine defers the import marker, so you can copy them later and restart. Malformed JSON or incompatible analytics versions stop the import with an error rather than dropping records.
+## Install with Docker Compose
 
-The legacy exports provide analytics, activity, disk history, and deletion history, but they do not contain the current torrent list or current ranking. Graine now builds an initial historical dashboard from those records. It labels that data as imported and leaves the current ranking empty until a fixture scan or real management scan runs. Copy `analytics.json` as well as the JSONL files when available: it stores the lifetime baseline used for the all-time leaderboard. Without it, historical activity events still import, but pre-observation lifetime totals cannot be reconstructed from JSONL alone.
+A published image is available as `ghcr.io/0x7375/graine:latest` once the GitHub Actions publishing workflow has completed. See [`deploy/`](deploy/) for an example `compose.yaml` and `config.toml` suitable for a Linux Docker or Podman host (including NixOS and UGREEN NAS devices with Docker support).
 
-### 2. Full Rust management-cycle development using a safe fixture
+On the host:
 
-Initialize a local filesystem dataset:
+1. Copy `deploy/compose.yaml` and `deploy/config.toml` into your chosen directory.
+2. Adjust the qBittorrent URL, tracker groups, categories, and absolute `disk_path`. Torrent paths returned by qBittorrent must also exist inside Graine's container; preserve them with a read-only bind mount.
+3. Create a file containing **only** the qBittorrent WebUI password and mount it at the configured `password_file`.
+4. Persist `/var/lib/graine` for SQLite. Use `management_enabled = false` to disable the scheduled worker and keep `dry_run = true` while testing: manual runs are still possible through the button.
+5. Run `docker compose pull && docker compose up -d` and inspect `docker compose logs -f graine`.
 
-```sh
-./scripts/init-fixtures.sh
-```
+The example uses Linux host networking so `127.0.0.1` can reach a local qBittorrent WebUI. A bridged container also works, but requires an accessible qBittorrent address, Axum listening on a container interface, and a published web port. See [`deploy/README.md`](deploy/README.md).
 
-It creates small files in `fixtures/disk/`, including two real hardlink cases:
+**Security:** `POST /api/run` can trigger *real torrent deletions* and has no application-level authentication. Never expose Graine to an untrusted network. Put it behind a protected reverse proxy or restrict access at the host/firewall level. A read-only volume mount does **not** stop Graine from asking qBittorrent to delete files through its API.
 
-- A movie shared by two torrent save paths (same inode, two links).
-- An episode with an additional hardlink outside the managed torrent paths (same inode, external link).
+## Configuration
 
-`fixtures/qbittorrent.json` provides a local qBittorrent snapshot with four example torrents. Graine reads the fixture directly; it does not contact qBittorrent. Fixture mode always forces dry-run and the delete function explicitly refuses to run in fixture mode.
+Copy [`config.example.toml`](config.example.toml) and adjust it. By default the executable reads `/etc/graine/config.toml`; override with `--config PATH`. Passwords are read from `password_file`, `--password-file PATH`, or `QBIT_PW` (fallback).
 
-Run one complete Rust calculation:
-
-```sh
-cargo run -- --config config.dev.toml --once --dry
-```
-
-This exercises torrent filtering, file metadata inspection, inode clustering, scoring, ranking, disk accounting, watermark decisions, and dashboard serialization against a real local filesystem. `df` measures the filesystem containing `fixtures/disk`, not the server disk. The run updates the latest dashboard preview, but does not persist analytics/history or delete anything.
-
-The fixture deliberately uses actual local hardlinks; a JSON-only mock of inode values would not test the OS metadata behavior Graine relies on.
-
-### 3. Start the backend and frontend
-
-Install the development dependencies:
-
-```sh
-nix develop
-cd web && pnpm install && cd ..
-```
-
-The backend config has `management_enabled = false`, so starting it cannot trigger a qBittorrent scan. It serves the imported dashboard from SQLite:
+| Option | Meaning |
+| --- | --- |
+| `url` | qBittorrent WebUI base URL |
+| `disk_path` | Filesystem containing the torrent data; absolute paths must agree with qBittorrent |
+| `managed_categories` | Managed categories, automatically including `.cross` variants |
+| `trackers` | Logical tracker names, announce hosts, priorities |
+| `high_watermark` / `low_watermark` | Begin eviction above the high threshold, target the low threshold |
+| `grace_days` | Seeding grace period for original torrents |
+| `interval_seconds` | Worker frequency; default **3600** seconds |
+| `management_enabled` | Enable hourly worker (and one cycle immediately on startup); default true |
+| `dry_run` | Preview decisions without deleting or persisting analytics/history |
+| `database_path` | Persistent SQLite database path |
+| `listen` / `web_dir` | Axum bind address and compiled React directory |
+| `fixture_path` | Optional local JSON fixture; always read-only, never connects to qBittorrent |
 
 ```sh
-# Terminal 1
-watchexec --restart --watch src --watch Cargo.toml -- cargo run -- --config config.dev.toml
+# Continuous service
+./target/release/graine --config ./config.toml
 
-# Terminal 2
-cd web && pnpm dev
+# Run one management cycle
+./target/release/graine --config ./config.toml --once
+
+# Preview once, without deleting torrents
+./target/release/graine --config ./config.toml --once --dry
 ```
 
-Open `http://localhost:5173`. Vite proxies `/api` to Axum on `127.0.0.1:3000`. Frontend changes hot-reload; backend changes restart the Rust process. Set `GRAINE_API_TARGET` if Axum listens elsewhere.
+### SQLite and backups
 
-To populate the ranking from the fixture, run the one-shot fixture command from workflow 2. Then refresh the dashboard. You can stop and restart the dashboard-only backend independently; it does not scan on startup.
+Graine keeps analytics, torrent history, execution history, ranking baselines, and the most recent dashboard in one SQLite database. No JSON/JSONL import is performed by current versions. Removed torrents remain in historical leaderboard data.
 
-### Local state and reset
-
-Development data is stored separately from production:
-
-- `data/legacy/`: copied source JSON/JSONL files (kept unchanged).
-- `data/dev.sqlite3`: imported history and current dashboard payload.
-- `fixtures/disk/`: generated local file/hardlink test dataset.
-- `fixtures/qbittorrent.json`: local qBittorrent response fixture.
-
-To start the development database from scratch and re-import the copied files, stop Graine and remove only the development DB files:
+For a consistent backup, use SQLite's online backup command. This works while the service is running:
 
 ```sh
-rm -f data/dev.sqlite3 data/dev.sqlite3-wal data/dev.sqlite3-shm
+sqlite3 /var/lib/graine/graine.sqlite3 ".backup '/path/you/can/write/graine-backup.sqlite3'"
 ```
 
-Then restart the backend. Do not delete `data/legacy/` unless you have another copy of the source data.
+Do not copy only a live `.sqlite3` file while WAL transactions may be pending. Do not commit your database, credentials, downloaded data or torrent names to a public repository.
 
-## Configuration and runtime behavior
+## Local development
 
-The standard configuration path is `/etc/graine/config.toml`. Override it with `--config PATH`. The qBittorrent password can be supplied with `password_file` in TOML or `--password-file PATH`; `QBIT_PW` remains supported.
-
-`interval_seconds` defaults to 3600 (one hour). `management_enabled` defaults to `true`; set it to `false` for dashboard-only operation. The worker runs immediately when enabled, then at the configured interval. It does not overlap its own management cycles.
-
-```sh
-# Start the production-style service (requires a real config and password file).
-graine --config /etc/graine/config.toml
-
-# Run exactly one real management cycle.
-graine --config /etc/graine/config.toml --once
-
-# Run exactly one dry management cycle.
-graine --config /etc/graine/config.toml --once --dry
-```
-
-## Nix development shell
+Use the Nix development shell, or install Rust, Node.js, pnpm and Watchexec yourself:
 
 ```sh
 nix develop
+pnpm --dir web install
+make backend-dev    # terminal 1: Axum on http://127.0.0.1:3000
+make frontend-dev   # terminal 2: Vite on http://localhost:5173
 ```
 
-The shell provides Rust/Cargo, rustfmt, Clippy, rust-analyzer, Node.js, pnpm, SQLite CLI, and Watchexec. Node and pnpm are not needed by the production Rust service.
+`config.dev.toml` sets `management_enabled = false`, so starting the backend does not run a scheduled scan; fixture mode forces dry-run for any manually triggered scan. Vite proxies `/api` requests to Axum.
 
-## Build
+For **realistic dashboard data**, back up SQLite on the server, copy that backup to `data/dev.sqlite3` (with the local backend stopped), then start the two development processes. No live server or filesystem mount is needed to view existing dashboard data.
+
+For **UI demos and retention tests**, generate a complete synthetic dataset:
 
 ```sh
-cd web
-pnpm install
-pnpm build
-cd ..
-cargo build --release
+make fixture-run          # regenerate 90 groups / 201 torrents, history and isolated SQLite; runs --once --dry
+make fixture-backend-dev  # serve the synthetic dashboard at localhost:3000 (terminal 1)
+make frontend-dev         # Vite frontend at localhost:5173 (terminal 2)
 ```
 
-The repository must contain its generated `Cargo.lock` before `nix build`. Axum serves the compiled `web/dist` directory and `/api/*` from the same origin; Node.js is not needed at runtime.
+The generator (`scripts/generate-fixtures.py`) and `make fixture-check` use only Python's standard library. It creates invented media titles and tracker counters, single/multi-torrent groups, multiple cross-seeds, multi-file torrents, external hardlinks, grace-protected groups, incomplete/unmanaged torrents, historical uploads, disk usage, failed runs and deletion batches. Actual local hardlinks exercise the inode logic. Media files are sparse (large logical sizes, minimal disk use); **the figures are fictional and are not physical space measurements**. It writes only to `fixtures/disk/demo/`, the ignored `fixtures/qbittorrent.generated.json` and the separate `data/fixture.sqlite3`. Regeneration replaces these generated files; it does not touch `data/dev.sqlite3` or production data.
 
-## Important distinction: SSH tunnel vs filesystem access
+Fixture mode never contacts qBittorrent and refuses deletion. Do not use SSHFS to test hardlinks or inode accounting: its inode/link metadata may not match the server filesystem.
 
-An SSH tunnel to qBittorrent exposes only its HTTP API. The management cycle also runs `df` against `disk_path` and calls `stat` on torrent files. For a faithful local management test, the relevant files and hardlinks must exist locally. SSHFS is not recommended for this application because its inode/hardlink behavior does not reliably reproduce the local filesystem semantics Graine uses. The fixture approach above does.
+## Build and checks
+
+```sh
+make check             # formatting, cargo check/test/clippy and TypeScript
+make build             # Vite production build and cargo release build
+```
+
+For deployment, the [Dockerfile](Dockerfile) builds both the frontend and Rust binary; Node.js is **not** required in the runtime image. GitHub Actions publishes Docker images to GHCR on pushes to `main` and version tags. Commit **both** `Cargo.lock` and `web/pnpm-lock.yaml` for reproducible builds. Nix can also provide the development shell; the OCI image is the primary deployment artifact.
 
 ## API
 
-- `GET /api/health` — process health.
-- `GET /api/dashboard` — latest Rust-generated dashboard payload, including overview metrics, disk history, tracker history, ranking, leaderboards, and eviction history.
+| Endpoint | Function |
+| --- | --- |
+| `GET /api/health` | Health check |
+| `GET /api/dashboard` | Latest dashboard payload |
+| `GET /api/run/status` | Worker activity and last result |
+| `POST /api/run` | Start a manual cycle; `202` accepted or `409` if one is running |
+| `GET /api/runs?limit=30&before=ID&filter=all` | Paginated run history; filters: `all`, `deletions`, `errors` |
 
-Page loads and API requests never trigger a management scan.
+Page loads do not start a management cycle. Only the scheduled worker, `--once`, or `POST /api/run` can do so.

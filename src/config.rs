@@ -33,10 +33,6 @@ fn default_database_path() -> PathBuf {
     PathBuf::from("/var/lib/graine/graine.sqlite3")
 }
 
-fn default_legacy_data_dir() -> PathBuf {
-    PathBuf::from("/var/lib/graine")
-}
-
 /// A logical private-tracker group. Multiple announce hosts can share one dashboard identity.
 #[derive(Clone, Deserialize)]
 pub(crate) struct TrackerGroup {
@@ -75,9 +71,6 @@ pub(crate) struct Config {
     /// SQLite database path.
     #[serde(default = "default_database_path")]
     pub(crate) database_path: PathBuf,
-    /// Directory containing analytics.json and the legacy JSONL files to import once.
-    #[serde(default = "default_legacy_data_dir")]
-    pub(crate) legacy_data_dir: PathBuf,
     /// Path to a file containing the qBittorrent password. Can be overridden by --password-file.
     #[serde(default)]
     pub(crate) password_file: Option<PathBuf>,

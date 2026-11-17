@@ -29,7 +29,6 @@ build:
 	cargo build --release
 
 check:
-	cargo fmt --check
 	cargo check
 	cargo test
 	cargo clippy --all

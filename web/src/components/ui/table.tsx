@@ -8,7 +8,7 @@ type TableProps = React.HTMLAttributes<HTMLTableElement> & {
 
 const Table = React.forwardRef<HTMLTableElement, TableProps>(
   ({ className, containerClassName, visibleRows, ...props }, forwardedRef) => {
-    const internalRef = React.useRef<HTMLTableElement>(null);
+    const internalRef = React.useRef<HTMLTableElement | null>(null);
     const [maxHeight, setMaxHeight] = React.useState<number | undefined>();
 
     // Measure ten complete rows plus part of the next row to suggest scrolling.
@@ -24,14 +24,10 @@ const Table = React.forwardRef<HTMLTableElement, TableProps>(
           setMaxHeight((previous) => previous === undefined ? previous : undefined);
           return;
         }
-        // Sum the actual heights of the visible primary rows, not their viewport
-        // positions: expanded detail rows must remain inside a fixed scroll area.
-        const headerHeight = header?.getBoundingClientRect().height ?? 0;
-        const completeHeight = rows.slice(0, completeRows).reduce(
-          (sum, row) => sum + row.getBoundingClientRect().height, 0,
-        );
-        const nextHeight = rows[completeRows]?.getBoundingClientRect().height ?? 0;
-        const height = Math.ceil(headerHeight + completeHeight + nextHeight * partialRow);
+        const lastVisibleRow = rows[completeRows - 1];
+        const nextRow = rows[completeRows];
+        const fullHeight = lastVisibleRow.getBoundingClientRect().bottom - table.getBoundingClientRect().top;
+        const height = Math.ceil(fullHeight + (nextRow?.getBoundingClientRect().height ?? 0) * partialRow);
         setMaxHeight((previous) => previous === height ? previous : height);
       };
       measure();
@@ -50,7 +46,7 @@ const Table = React.forwardRef<HTMLTableElement, TableProps>(
     return (
       <div
         className={cn("relative w-full overflow-auto", containerClassName)}
-        style={{ maxHeight, overflowAnchor: "none" }}
+        style={{ maxHeight }}
       >
         <table ref={setRef} className={cn("w-full caption-bottom text-sm", className)} {...props} />
       </div>

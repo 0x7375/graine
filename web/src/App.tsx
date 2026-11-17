@@ -589,7 +589,7 @@ function RankingPage({
                             <div className="max-w-[390px] truncate font-medium" title={cluster.name}>{cluster.name}</div>
                           )}
                           <div className={`mt-1 flex max-w-[390px] items-center gap-2 text-xs text-muted-foreground ${expandable ? "pl-6" : ""}`}>
-                            <span className="min-w-0 truncate">{countLabel(language, cluster.torrent_count, "torrent", "torrents")} · {cluster.tracker_hosts.join(", ")}</span>
+                            <span className="min-w-0 truncate">{cluster.tracker_hosts.join(", ")}</span>
                             {inGrace && <span className="inline-flex shrink-0 items-center text-primary" title={graceTooltip} aria-label={graceTooltip}>
                               <Clock3 className="h-3.5 w-3.5" />
                             </span>}
@@ -1042,37 +1042,41 @@ function ExecutionItem({ run }: { run: ManagementRun }) {
 
   const header = (
     <div className="w-full min-w-0 px-4 py-3">
-      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-        <time className="shrink-0 whitespace-nowrap font-medium tabular-nums text-muted-foreground" dateTime={new Date(run.started_at * 1000).toISOString()}>
-          {formatDate(run.started_at, language)}
-        </time>
-        {isArchive ? (
-          <span className="text-muted-foreground">{t("Archived")}</span>
-        ) : (
-          <>
-            {statusLabel && <span className={`font-semibold ${statusColor}`}>{t(statusLabel)}</span>}
-            <span className="text-muted-foreground">{t(triggerLabels[run.trigger as keyof typeof triggerLabels])}</span>
-            {isPreview && <span className="text-muted-foreground">· {t("Dry run")}</span>}
-          </>
+      <div className="flex min-w-0 items-start justify-between gap-3 text-xs">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          <time className="shrink-0 whitespace-nowrap font-medium tabular-nums text-muted-foreground" dateTime={new Date(run.started_at * 1000).toISOString()}>
+            {formatDate(run.started_at, language)}
+          </time>
+          {isArchive ? (
+            <span className="text-muted-foreground">{t("Archived")}</span>
+          ) : (
+            <>
+              {statusLabel && <span className={`font-semibold ${statusColor}`}>{t(statusLabel)}</span>}
+              <span className="text-muted-foreground">{t(triggerLabels[run.trigger as keyof typeof triggerLabels])}</span>
+              {isPreview && <span className="text-muted-foreground">· {t("Dry run")}</span>}
+            </>
+          )}
+        </div>
+        {run.duration_ms !== null && (
+          <span className="shrink-0 whitespace-nowrap text-muted-foreground tabular-nums">{formatDuration(run.duration_ms)}</span>
         )}
       </div>
       <div className="mt-1.5 flex min-w-0 items-center justify-between gap-3 text-sm">
-        <span className="min-w-0 text-foreground">
-          {isArchive && !groups.length
-            ? <span className="text-muted-foreground">{t("No recorded deletions")}</span>
-            : <><strong className="font-semibold">{count}</strong> <span>{countLabel}</span></>}
-        </span>
-        <div className="flex shrink-0 items-center gap-3 tabular-nums sm:gap-5">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="text-foreground">
+            {isArchive && !groups.length
+              ? <span className="text-muted-foreground">{t("No recorded deletions")}</span>
+              : <><strong className="font-semibold">{count}</strong> <span>{countLabel}</span></>}
+          </span>
           {!isPreview && removedData !== null && removed > 0 && (
-            <span className="whitespace-nowrap text-muted-foreground">
-              <strong className="font-semibold text-foreground">{formatBytes(removedData)}</strong> {t("data removed")}
+            <span className="inline-flex items-center gap-2 whitespace-nowrap text-muted-foreground tabular-nums">
+              <span className="text-muted-foreground/60">·</span>
+              <span>{formatBytes(removedData)}</span>
+              <span>{t("data removed")}</span>
             </span>
           )}
-          {run.duration_ms !== null && (
-            <span className="whitespace-nowrap text-xs text-muted-foreground">{formatDuration(run.duration_ms)}</span>
-          )}
-          {expandable && <ChevronDown aria-hidden="true" className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />}
         </div>
+        {expandable && <ChevronDown aria-hidden="true" className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />}
       </div>
     </div>
   );

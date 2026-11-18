@@ -14,8 +14,13 @@ backend-dev:
 	watchexec --restart --watch src --watch Cargo.toml --watch config.dev.toml -- cargo run -- --config config.dev.toml
 
 # Fresh synthetic dataset and history, entirely separate from data/dev.sqlite3.
+# Two dry cycles allow Rust to calculate movement against seeded synthetic
+# historical standings. Only the dedicated fixture database is modified.
 fixture-run: init-fixtures fixture-check
 	cargo run -- --config config.fixture.toml --once --dry
+	python3 scripts/seed-leaderboard-movement.py
+	cargo run -- --config config.fixture.toml --once --dry
+	python3 scripts/seed-leaderboard-movement.py --verify
 
 # Serve the synthetic dashboard for UI development (terminal 1).
 fixture-backend-dev:
@@ -29,6 +34,7 @@ build:
 	cargo build --release
 
 check:
+	cargo fmt --check
 	cargo check
 	cargo test
 	cargo clippy --all

@@ -2,6 +2,9 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type React
 import {
   Activity,
   AlertTriangle,
+  ArrowDown,
+  ArrowDownUp,
+  ArrowUp,
   ChevronDown,
   Clock3,
   Database,
@@ -504,6 +507,47 @@ function DiskTooltip({ active, payload, label }: { active?: boolean; payload?: A
   );
 }
 
+type SortDirection = "asc" | "desc";
+type SortState<Key extends string> = { key: Key; direction: SortDirection };
+type RankingSortKey = "rank" | "name" | "category" | "score" | "cost" | "uploaded";
+type LeaderboardSortKey = "rank" | "name" | "category" | "activity" | "net";
+
+// Avoid subtracting infinities when comparing clusters with zero removable cost.
+function compareNumeric(a: number, b: number): number {
+  return a === b ? 0 : a < b ? -1 : 1;
+}
+
+function nextSort<Key extends string>(previous: SortState<Key>, key: Key, initialDirection: SortDirection): SortState<Key> {
+  return { key, direction: previous.key === key ? (previous.direction === "asc" ? "desc" : "asc") : initialDirection };
+}
+
+function SortableHead<Key extends string>({
+  label, field, sort, onSort, initialDirection = "asc", numeric = false, className = "",
+}: {
+  label: string;
+  field: Key;
+  sort: SortState<Key>;
+  onSort: (field: Key, initialDirection: SortDirection) => void;
+  initialDirection?: SortDirection;
+  numeric?: boolean;
+  className?: string;
+}) {
+  const active = sort.key === field;
+  const Icon = active ? (sort.direction === "asc" ? ArrowUp : ArrowDown) : ArrowDownUp;
+  return (
+    <TableHead className={className} aria-sort={active ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>
+      <button
+        type="button"
+        className={`group flex w-full items-center gap-1.5 whitespace-nowrap text-left transition-colors hover:text-foreground focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${numeric ? "justify-end" : "justify-start"} ${active ? "text-foreground" : ""}`}
+        onClick={() => onSort(field, initialDirection)}
+      >
+        <span>{label}</span>
+        <Icon aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 ${active ? "text-primary" : "text-muted-foreground/50 group-hover:text-muted-foreground"}`} />
+      </button>
+    </TableHead>
+  );
+}
+
 function RankingPage({
   rows,
   search,
@@ -516,24 +560,45 @@ function RankingPage({
   const language = useLanguage();
   const t = (key: string) => translate(language, key);
   const [expandedCluster, setExpandedCluster] = useState<string | null>(null);
+  // Keep the same rank numbers as the original score-ordered table after changing display sort.
+  const displayRanks = useMemo(() => new Map(
+    [...rows]
+      .sort((a, b) => compareNumeric(scoreForSort(b), scoreForSort(a)) || a.rank - b.rank)
+      .map((cluster, index): [number, number] => [cluster.rank, index + 1]),
+  ), [rows]);
+  const [sort, setSort] = useState<SortState<RankingSortKey>>({ key: "score", direction: "desc" });
+  const sortBy = (key: RankingSortKey, direction: SortDirection) => {
+    setSort((previous) => nextSort(previous, key, direction));
+    setExpandedCluster(null);
+  };
   const filteredRows = useMemo(() => {
     const query = search.trim().toLowerCase();
-    return rows
-      .filter((cluster) => [
-        cluster.name,
-        cluster.category,
-        cluster.tracker_hosts.join(" "),
-        cluster.torrent_names.join(" "),
-      ].join(" ").toLowerCase().includes(query))
-      .sort((a, b) => scoreForSort(b) - scoreForSort(a));
-  }, [rows, search]);
+    const matching = rows.filter((cluster) => [
+      cluster.name,
+      cluster.category,
+      cluster.tracker_hosts.join(" "),
+      cluster.torrent_names.join(" "),
+    ].join(" ").toLowerCase().includes(query));
+    return matching.sort((a, b) => {
+      let result: number;
+      switch (sort.key) {
+        case "rank": result = compareNumeric(displayRanks.get(a.rank) ?? a.rank, displayRanks.get(b.rank) ?? b.rank); break;
+        case "name": result = a.name.localeCompare(b.name, language); break;
+        case "category": result = displayCategory(a.category).localeCompare(displayCategory(b.category), language); break;
+        case "score": result = compareNumeric(scoreForSort(a), scoreForSort(b)); break;
+        case "cost": result = compareNumeric(a.cost_bytes, b.cost_bytes); break;
+        case "uploaded": result = compareNumeric(a.uploaded_bytes, b.uploaded_bytes); break;
+      }
+      return (sort.direction === "asc" ? result : -result) || a.rank - b.rank;
+    });
+  }, [rows, search, sort, language, displayRanks]);
 
   return (
     <section className="space-y-3">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h2 className="text-2xl font-bold tracking-tight">{t("Ranking")}</h2>
-          <p className="mt-1 text-sm text-muted-foreground">{t("Clusters ordered by score, highest first.")}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{t("Clusters ranked by score.")}</p>
         </div>
         <div className="relative">
           <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
@@ -552,15 +617,15 @@ function RankingPage({
           <EmptyState message={t("No matching clusters.")} />
         ) : (
           <div>
-            <Table containerClassName="rounded-lg" visibleRows={10.5}>
+            <Table key={`ranking-${sort.key}-${sort.direction}`} containerClassName="rounded-lg" visibleRows={10.5}>
               <TableHeader className="sticky top-0 z-10 bg-card">
                 <TableRow>
-                  <TableHead className="w-12">#</TableHead>
-                  <TableHead className="min-w-[240px]">{t("Cluster / torrents")}</TableHead>
-                  <TableHead>{t("Category")}</TableHead>
-                  <TableHead className="text-right">{t("Score")}</TableHead>
-                  <TableHead className="text-right">{t("Cost")}</TableHead>
-                  <TableHead className="text-right">{t("Uploaded")}</TableHead>
+                  <SortableHead label="#" field="rank" sort={sort} onSort={sortBy} className="w-12" />
+                  <SortableHead label={t("Cluster / torrents")} field="name" sort={sort} onSort={sortBy} className="min-w-[240px]" />
+                  <SortableHead label={t("Category")} field="category" sort={sort} onSort={sortBy} />
+                  <SortableHead label={t("Score")} field="score" sort={sort} onSort={sortBy} initialDirection="desc" numeric />
+                  <SortableHead label={t("Cost")} field="cost" sort={sort} onSort={sortBy} initialDirection="desc" numeric />
+                  <SortableHead label={t("Uploaded")} field="uploaded" sort={sort} onSort={sortBy} initialDirection="desc" numeric />
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -577,7 +642,7 @@ function RankingPage({
                   return (
                     <Fragment key={key}>
                       <TableRow className={`h-[60px] ${expandable ? "cursor-pointer" : "hover:bg-transparent"}`} data-ranking-cluster onClick={expandable ? () => setExpandedCluster(expanded ? null : key) : undefined}>
-                        <TableCell className="font-mono text-xs text-muted-foreground">{String(index + 1).padStart(2, "0")}</TableCell>
+                        <TableCell className="font-mono text-xs text-muted-foreground">{String(displayRanks.get(cluster.rank) ?? index + 1).padStart(2, "0")}</TableCell>
                         <TableCell>
                           {expandable ? (
                             <button type="button" className="flex max-w-[390px] min-w-0 items-center gap-2 text-left focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -816,9 +881,28 @@ function LeaderboardPage({
   const language = useLanguage();
   const t = (key: string) => translate(language, key);
   const selectedPeriod = dashboard.periods[leaderPeriod] || EMPTY_PERIOD;
-  const leaders = [...selectedPeriod.torrents]
-    .sort((a, b) => netUpload(b.uploaded_bytes, b.downloaded_bytes) - netUpload(a.uploaded_bytes, a.downloaded_bytes) || a.hash.localeCompare(b.hash))
-    .slice(0, 100);
+  const [sort, setSort] = useState<SortState<LeaderboardSortKey>>({ key: "net", direction: "desc" });
+  const sortBy = (key: LeaderboardSortKey, direction: SortDirection) => {
+    setSort((previous) => nextSort(previous, key, direction));
+  };
+  // The top 100 are always selected by net upload, irrespective of display order.
+  const leaders = useMemo(() => {
+    const top = [...selectedPeriod.torrents]
+      .sort((a, b) => compareNumeric(netUpload(b.uploaded_bytes, b.downloaded_bytes), netUpload(a.uploaded_bytes, a.downloaded_bytes)) || a.hash.localeCompare(b.hash))
+      .slice(0, 100)
+      .map((torrent, index) => ({ torrent, rank: index + 1 }));
+    return top.sort((a, b) => {
+      let result: number;
+      switch (sort.key) {
+        case "rank": result = a.rank - b.rank; break;
+        case "name": result = a.torrent.name.localeCompare(b.torrent.name, language); break;
+        case "category": result = displayCategory(a.torrent.category).localeCompare(displayCategory(b.torrent.category), language); break;
+        case "activity": result = compareNumeric(a.torrent.timestamp, b.torrent.timestamp); break;
+        case "net": result = compareNumeric(netUpload(a.torrent.uploaded_bytes, a.torrent.downloaded_bytes), netUpload(b.torrent.uploaded_bytes, b.torrent.downloaded_bytes)); break;
+      }
+      return (sort.direction === "asc" ? result : -result) || a.rank - b.rank;
+    });
+  }, [selectedPeriod.torrents, sort, language]);
 
   const changes = dashboard.rank_changes?.[leaderPeriod] || {};
 
@@ -827,7 +911,7 @@ function LeaderboardPage({
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h2 className="text-2xl font-bold tracking-tight">{t("Torrent leaderboard")}</h2>
-          <p className="mt-1 text-sm text-muted-foreground">{t("Torrents ranked by net upload.")}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{t("Leaderboard based on net upload.")}</p>
         </div>
         <div className="flex items-center gap-2">
           <label className="text-xs text-muted-foreground" htmlFor="leader-period">{t("Period")}</label>
@@ -841,27 +925,28 @@ function LeaderboardPage({
         {leaders.length === 0 ? (
           <EmptyState message={t("No torrent activity recorded for this period yet.")} />
         ) : (
-          <Table containerClassName="rounded-lg" visibleRows={10.5}>
+          <Table key={`leaders-${leaderPeriod}-${sort.key}-${sort.direction}`} containerClassName="rounded-lg" visibleRows={10.5}>
             <TableHeader className="sticky top-0 z-10 bg-card">
               <TableRow>
-                <TableHead className="w-[1%] whitespace-nowrap">#</TableHead>
-                <TableHead className="min-w-[260px]">{t("Torrent")}</TableHead>
-                <TableHead>{t("Category")}</TableHead>
-                <TableHead>{t("Last activity")}</TableHead>
-                <TableHead className="text-right">{t("Net upload")}</TableHead>
+                <SortableHead label="#" field="rank" sort={sort} onSort={sortBy} className="w-[1%] whitespace-nowrap" />
+                <SortableHead label={t("Torrent")} field="name" sort={sort} onSort={sortBy} className="min-w-[260px]" />
+                <SortableHead label={t("Category")} field="category" sort={sort} onSort={sortBy} />
+                <SortableHead label={t("Last activity")} field="activity" sort={sort} onSort={sortBy} initialDirection="desc" />
+                <SortableHead label={t("Net upload")} field="net" sort={sort} onSort={sortBy} initialDirection="desc" numeric />
               </TableRow>
             </TableHeader>
             <TableBody>
-              {leaders.map((torrent, index) => {
+              {leaders.map(({ torrent, rank }) => {
                 const net = netUpload(torrent.uploaded_bytes, torrent.downloaded_bytes);
                 const change = changes[torrent.hash];
                 return (
                   <TableRow key={torrent.hash} className="h-[60px]">
                     <TableCell className="whitespace-nowrap font-mono text-xs">
-                      <span className="text-muted-foreground">{index + 1}</span>
+                      <span className="text-muted-foreground">{rank}</span>
                       {change !== undefined && change !== 0 && (
-                        <span className={`ml-2 font-semibold ${change > 0 ? "text-primary" : "text-destructive"}`} title={`${t(leaderPeriod === "all" ? "Since previous execution" : "Since first run in period")}${dashboard.rank_baselines_at?.[leaderPeriod] ? ` (${formatDate(dashboard.rank_baselines_at[leaderPeriod]!, language)})` : ""}: ${t(change > 0 ? "up" : "down")} ${countLabel(language, Math.abs(change), "position", "positions")}`}>
-                          {change > 0 ? `+${change}` : change}
+                        <span className={`ml-2 inline-flex items-center gap-0.5 align-middle font-semibold ${change > 0 ? "text-primary" : "text-destructive"}`} title={`${t(leaderPeriod === "all" ? "Since previous execution" : "Since first run in period")}${dashboard.rank_baselines_at?.[leaderPeriod] ? ` (${formatDate(dashboard.rank_baselines_at[leaderPeriod]!, language)})` : ""}: ${t(change > 0 ? "up" : "down")} ${countLabel(language, Math.abs(change), "position", "positions")}`}>
+                          {change > 0 ? <ArrowUp className="h-3 w-3" aria-hidden="true" /> : <ArrowDown className="h-3 w-3" aria-hidden="true" />}
+                          {Math.abs(change)}
                         </span>
                       )}
                     </TableCell>

@@ -94,14 +94,14 @@ impl ConnectionInfo {
     }
 }
 
-pub(crate) fn login(conn: &ConnectionInfo, password: &str) -> Result<()> {
+pub(crate) fn login(conn: &ConnectionInfo, username: &str, password: &str) -> Result<()> {
     match conn {
         ConnectionInfo::Fixture { .. } => Ok(()),
         ConnectionInfo::Api { agent, url } => {
             let response = agent
                 .post(format!("{url}/api/v2/auth/login"))
                 .header("Referer", url)
-                .send_form([("username", "admin"), ("password", password)])
+                .send_form([("username", username), ("password", password)])
                 .context("qBittorrent login request failed")?;
 
             if !response.headers().contains_key("set-cookie") {

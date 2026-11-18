@@ -106,7 +106,7 @@ pub(crate) fn run_management_cycle(
     let is_dry = cfg.dry_run || force_dry || conn.is_fixture();
     if !conn.is_fixture() {
         let password = password.context("qBittorrent password is required outside fixture mode")?;
-        login(&conn, password)?;
+        login(&conn, &cfg.username, password)?;
     }
 
     let managed: Vec<_> = get_torrents(&conn)?

@@ -1,6 +1,10 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
+fn default_username() -> String {
+    "admin".to_string()
+}
+
 fn default_high() -> f64 {
     0.85
 }
@@ -33,6 +37,10 @@ fn default_database_path() -> PathBuf {
     PathBuf::from("/var/lib/graine/graine.sqlite3")
 }
 
+fn default_legacy_data_dir() -> PathBuf {
+    PathBuf::from("/var/lib/graine")
+}
+
 /// A logical private-tracker group. Multiple announce hosts can share one dashboard identity.
 #[derive(Clone, Deserialize)]
 pub(crate) struct TrackerGroup {
@@ -48,6 +56,9 @@ pub(crate) struct Config {
     #[serde(default = "default_hide_unconfigured_trackers")]
     pub(crate) hide_unconfigured_trackers: bool,
     pub(crate) url: String,
+    /// qBittorrent WebUI login name.
+    #[serde(default = "default_username")]
+    pub(crate) username: String,
     /// Filesystem containing downloads and the media library.
     pub(crate) disk_path: String,
     /// Start evicting above this fraction of filesystem usage.
@@ -71,6 +82,9 @@ pub(crate) struct Config {
     /// SQLite database path.
     #[serde(default = "default_database_path")]
     pub(crate) database_path: PathBuf,
+    /// Directory containing analytics.json and the legacy JSONL files to import once.
+    #[serde(default = "default_legacy_data_dir")]
+    pub(crate) legacy_data_dir: PathBuf,
     /// Path to a file containing the qBittorrent password. Can be overridden by --password-file.
     #[serde(default)]
     pub(crate) password_file: Option<PathBuf>,
@@ -120,6 +134,10 @@ impl Config {
 
         if self.listen.trim().is_empty() {
             return Err("listen cannot be empty".to_string());
+        }
+
+        if self.username.trim().is_empty() {
+            return Err("username cannot be empty".to_string());
         }
 
         if self.url.trim().is_empty() {
@@ -200,6 +218,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn username_can_be_configured() {
+        let config: Config = toml::from_str(
+            r#"
+            url = "http://localhost:8080"
+            username = "qb-user"
+            disk_path = "/data"
+            managed_categories = ["radarr"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.username, "qb-user");
+    }
+
+    #[test]
     fn management_interval_defaults_to_one_hour() {
         let config: Config = toml::from_str(
             r#"
@@ -212,5 +244,6 @@ mod tests {
 
         assert_eq!(config.interval_seconds, 3600);
         assert!(config.management_enabled);
+        assert_eq!(config.username, "admin");
     }
 }
